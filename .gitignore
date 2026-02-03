@@ -1,0 +1,20 @@
+# Secrets
+.env
+secrets/
+
+# Database
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Exports
+exports/
+
+# IDE
+.vscode/
+.idea/
