@@ -385,3 +385,26 @@ def list_channels():
     ).fetchall()
     conn.close()
     return {"channels": [{"name": c["channel"], "messages": c["count"], "last_activity": c["last_activity"]} for c in channels]}
+
+# ============ OPERATOR ACCESS ============
+
+OPERATOR_KEY = os.getenv("OPERATOR_KEY", "")
+
+def require_operator(authorization: str = Header(...)):
+    """Operator can only create tasks."""
+    token = authorization.replace("Bearer ", "")
+    if token != OPERATOR_KEY and token != ADMIN_KEY:
+        raise HTTPException(403, "Operator or admin access required")
+
+@app.post("/operator/task")
+def operator_create_task(task: TaskCreate, _: None = Depends(require_operator)):
+    """Create a task. Operator-level access (can't decay, export, or blacklist)."""
+    conn = get_db()
+    cursor = conn.execute('''
+        INSERT INTO tasks (type, target_url, target_title, submolt, topic, verification_question, verification_answer, submissions_needed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (task.type, task.target_url, task.target_title, task.submolt, task.topic, task.verification_question, task.verification_answer, task.submissions_needed))
+    conn.commit()
+    task_id = cursor.lastrowid
+    conn.close()
+    return {"task_id": task_id}
