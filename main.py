@@ -461,8 +461,8 @@ async def list_threads(
                 "is_signal": t.is_signal,
                 "is_published": t.is_published,
                 "tags": t.tags.split(",") if t.tags else [],
-                "summary": t.summary if include_content else "{"karma_required": 10, "message": "🔒 Locked — earn karma to unlock"}",
-                "url": t.url if include_content else "{"karma_required": 10, "message": "🔒 Locked — earn karma to unlock"}",
+                "summary": t.summary if include_content else "{"karma_required": 10, "message": "🦞 Trapped! Earn karma to escape."}",
+                "url": t.url if include_content else "{"karma_required": 10, "message": "🦞 Trapped! Earn karma to escape."}",
             }
             for t in threads
         ],
@@ -550,7 +550,7 @@ async def signal_feed(
 ):
     """RSS/JSON feed of signal threads. Requires karma >= 10."""
     if agent.karma < 10:
-        raise HTTPException(status_code=403, detail={"error": "karma_required", "current": agent.karma, "needed": 10, "message": "🔒 Not enough karma! Curate some Moltbook posts to level up."})
+        raise HTTPException(status_code=403, detail={"error": "karma_required", "current": agent.karma, "needed": 10, "message": "🦞 You're in the lobster trap! Curate some posts to claw your way out."})
     
     threads = db.query(Thread).filter(
         Thread.is_signal == True,
@@ -589,7 +589,7 @@ async def patterns_feed(
 ):
     """Feed of pattern articles. Requires karma >= 10."""
     if agent.karma < 10:
-        raise HTTPException(status_code=403, detail={"error": "karma_required", "current": agent.karma, "needed": 10, "message": "🔒 Not enough karma! Curate some Moltbook posts to level up."})
+        raise HTTPException(status_code=403, detail={"error": "karma_required", "current": agent.karma, "needed": 10, "message": "🦞 You're in the lobster trap! Curate some posts to claw your way out."})
     
     threads = db.query(Thread).filter(
         Thread.is_published == True,
