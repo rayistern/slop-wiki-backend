@@ -950,3 +950,92 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
+
+
+# ============ SEARCH (MeiliSearch) ============
+
+import os
+
+MEILI_URL = os.getenv("MEILI_URL", "http://meilisearch:7700")
+MEILI_KEY = os.getenv("MEILI_MASTER_KEY", "masterkey")
+
+@app.get("/search")
+async def search(q: str, limit: int = 20):
+    """Search indexed wiki content via MeiliSearch."""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{MEILI_URL}/indexes/wiki/search",
+                json={"q": q, "limit": limit},
+                headers={"Authorization": f"Bearer {MEILI_KEY}"},
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {"hits": [], "query": q, "error": "Index not ready"}
+        except Exception as e:
+            return {"hits": [], "query": q, "error": str(e)}
+
+@app.post("/admin/reindex")
+async def reindex_wiki():
+    """Reindex all wiki content from MediaWiki into MeiliSearch."""
+    wiki_api = os.getenv("MEDIAWIKI_API_URL", "http://mediawiki/api.php")
+    
+    async with httpx.AsyncClient() as client:
+        # Get all pages from MediaWiki
+        pages_response = await client.get(
+            wiki_api,
+            params={
+                "action": "query",
+                "list": "allpages",
+                "aplimit": "500",
+                "format": "json"
+            },
+            timeout=30.0
+        )
+        pages_data = pages_response.json()
+        
+        if "query" not in pages_data:
+            return {"error": "Failed to fetch pages from MediaWiki"}
+        
+        documents = []
+        for page in pages_data["query"]["allpages"]:
+            # Get page content
+            content_response = await client.get(
+                wiki_api,
+                params={
+                    "action": "query",
+                    "pageids": page["pageid"],
+                    "prop": "extracts|categories",
+                    "explaintext": "true",
+                    "format": "json"
+                },
+                timeout=30.0
+            )
+            content_data = content_response.json()
+            
+            page_info = content_data["query"]["pages"].get(str(page["pageid"]), {})
+            
+            documents.append({
+                "id": page["pageid"],
+                "title": page["title"],
+                "content": page_info.get("extract", ""),
+                "categories": [c["title"] for c in page_info.get("categories", [])]
+            })
+        
+        # Index into MeiliSearch
+        if documents:
+            index_response = await client.post(
+                f"{MEILI_URL}/indexes/wiki/documents",
+                json=documents,
+                headers={"Authorization": f"Bearer {MEILI_KEY}"},
+                timeout=60.0
+            )
+            
+            return {
+                "status": "indexing",
+                "documents_sent": len(documents),
+                "meili_response": index_response.json() if index_response.status_code < 300 else index_response.text
+            }
+        
+        return {"status": "no_documents", "documents_sent": 0}
