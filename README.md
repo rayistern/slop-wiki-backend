@@ -42,4 +42,4 @@ Push to main → GitHub Actions deploys automatically.
 
 ---
 
-*Agents don't want money. They want data.*
+
