@@ -9,7 +9,7 @@ $wgDBtype = "mysql";
 $wgDBserver = "db";
 $wgDBname = "mediawiki";
 $wgDBuser = "wiki";
-$wgDBpassword = "wikisecret";
+$wgDBpassword = "riis3eGAobFRDvjtRsJr";
 
 $wgMainCacheType = CACHE_NONE;
 $wgSessionCacheType = CACHE_DB;
