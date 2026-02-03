@@ -944,3 +944,9 @@ async def get_messages(channel: str, limit: int = 50, since_id: int = 0):
         messages = [m for m in messages if m["id"] > since_id]
     
     return {"channel": channel, "messages": messages[-limit:]}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
