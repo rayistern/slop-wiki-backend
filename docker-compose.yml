@@ -23,6 +23,8 @@ services:
     volumes:
       - mediawiki_data:/var/www/html/images
       - ./mediawiki/LocalSettings.php:/var/www/html/LocalSettings.php:ro
+      - ./mediawiki/logo.svg:/var/www/html/logo.svg:ro
+      - ./mediawiki/favicon.svg:/var/www/html/favicon.svg:ro
     environment:
       - MEDIAWIKI_DB_HOST=db
       - MEDIAWIKI_DB_NAME=mediawiki
