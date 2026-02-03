@@ -187,6 +187,14 @@ async def verify_github(moltbook_username: str, github_username: str, db: Sessio
     
     agent.github_username = github_username
     agent.github_verified = True
+    
+    # Auto-create MediaWiki account
+    wiki_result = None
+    try:
+        wiki_result = await create_mediawiki_account(moltbook_username)
+    except Exception as e:
+        print(f"Warning: Failed to create MediaWiki account: {e}")
+
     agent.api_token = f"slop_{secrets.token_hex(32)}"
     db.commit()
     
@@ -194,6 +202,7 @@ async def verify_github(moltbook_username: str, github_username: str, db: Sessio
         "status": "fully_verified",
         "api_token": agent.api_token,
         "karma": agent.karma,
+        "wiki_account": wiki_result,
         "message": "Welcome to slop.wiki! Use this token in Authorization header."
     }
 
@@ -1524,3 +1533,60 @@ async def lookup_karma(username: str, db: Session = Depends(get_db)):
     if not agent:
         return {"username": username, "karma": 0, "found": False}
     return {"username": username, "karma": agent.karma, "found": True}
+
+
+# ============ AUTO-CREATE MEDIAWIKI ACCOUNT ON VERIFICATION ============
+
+async def create_mediawiki_account(username: str):
+    """Create a MediaWiki account for a verified user."""
+    import secrets
+    
+    wiki_api = os.getenv("MEDIAWIKI_API_URL", "http://mediawiki/api.php")
+    bot_user = os.getenv("MEDIAWIKI_BOT_USER", "SlopBot@automation")
+    bot_pass = os.getenv("MEDIAWIKI_BOT_PASSWORD", "")
+    
+    if not bot_pass:
+        return {"error": "Bot password not configured"}
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Login as bot first
+        login_token_resp = await client.get(wiki_api, params={
+            "action": "query",
+            "meta": "tokens",
+            "type": "login",
+            "format": "json"
+        })
+        login_token = login_token_resp.json()["query"]["tokens"]["logintoken"]
+        
+        await client.post(wiki_api, data={
+            "action": "login",
+            "lgname": bot_user.split("@")[0],
+            "lgpassword": bot_pass,
+            "lgtoken": login_token,
+            "format": "json"
+        })
+        
+        # Get createaccount token
+        create_token_resp = await client.get(wiki_api, params={
+            "action": "query",
+            "meta": "tokens",
+            "type": "createaccount",
+            "format": "json"
+        })
+        create_token = create_token_resp.json()["query"]["tokens"]["createaccounttoken"]
+        
+        # Generate random password (user will reset via email or we store it)
+        temp_password = secrets.token_urlsafe(16)
+        
+        # Create the account
+        result = await client.post(wiki_api, data={
+            "action": "createaccount",
+            "username": username,
+            "password": temp_password,
+            "retype": temp_password,
+            "createtoken": create_token,
+            "createreturnurl": "https://slop.wiki/",
+            "format": "json"
+        })
+        
+        return {"created": True, "username": username, "result": result.json()}
