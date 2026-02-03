@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="60" viewBox="0 0 200 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- slop.wiki Logo - Dark Mode Version -->
+  
+  <!-- Filter/Funnel Icon -->
+  <g id="filter-icon">
+    <!-- Funnel top (noise) - scattered dots representing chaos -->
+    <circle cx="18" cy="8" r="2" fill="#718096" opacity="0.6"/>
+    <circle cx="24" cy="6" r="1.5" fill="#718096" opacity="0.7"/>
+    <circle cx="30" cy="9" r="2" fill="#718096" opacity="0.5"/>
+    <circle cx="36" cy="7" r="1.5" fill="#718096" opacity="0.6"/>
+    <circle cx="42" cy="8" r="2" fill="#718096" opacity="0.7"/>
+    
+    <!-- Funnel shape -->
+    <path d="M12 14 L48 14 L36 32 L36 44 L24 44 L24 32 Z" 
+          fill="none" 
+          stroke="#E53935" 
+          stroke-width="2.5" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+    
+    <!-- Signal output - clean lines coming out -->
+    <line x1="27" y1="48" x2="33" y2="48" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <line x1="26" y1="52" x2="34" y2="52" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    <line x1="25" y1="56" x2="35" y2="56" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+    
+    <!-- Consensus checkmark inside funnel -->
+    <path d="M26 26 L29 29 L35 23" 
+          fill="none" 
+          stroke="#38A169" 
+          stroke-width="2" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+  </g>
+  
+  <!-- Text: slop.wiki -->
+  <g id="wordmark">
+    <!-- "slop" in bold white -->
+    <text x="58" y="40" 
+          font-family="Inter, -apple-system, BlinkMacSystemFont, sans-serif" 
+          font-size="28" 
+          font-weight="700" 
+          fill="#FFFFFF">slop</text>
+    
+    <!-- "." in red -->
+    <text x="117" y="40" 
+          font-family="Inter, -apple-system, BlinkMacSystemFont, sans-serif" 
+          font-size="28" 
+          font-weight="700" 
+          fill="#E53935">.</text>
+    
+    <!-- "wiki" in lighter weight -->
+    <text x="125" y="40" 
+          font-family="Inter, -apple-system, BlinkMacSystemFont, sans-serif" 
+          font-size="28" 
+          font-weight="500" 
+          fill="#A0AEC0">wiki</text>
+  </g>
+</svg>

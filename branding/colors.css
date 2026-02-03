@@ -1,0 +1,177 @@
+/**
+ * slop.wiki Color System
+ * 
+ * Usage: Import this file and use CSS custom properties
+ * Example: color: var(--color-signal-red);
+ */
+
+:root {
+  /* ========================================
+     PRIMARY COLORS
+     ======================================== */
+  
+  /* Signal Red - Primary accent, CTAs, verified badges */
+  --color-signal-red: #E53935;
+  --color-signal-red-rgb: 229, 57, 53;
+  
+  /* Deep Black - Text, backgrounds, headers */
+  --color-deep-black: #1A1A1A;
+  --color-deep-black-rgb: 26, 26, 26;
+  
+  /* Pure White - Backgrounds, contrast */
+  --color-pure-white: #FFFFFF;
+  --color-pure-white-rgb: 255, 255, 255;
+
+  /* ========================================
+     SECONDARY COLORS (Grays)
+     ======================================== */
+  
+  /* Slate Gray - Secondary text, borders */
+  --color-slate-gray: #2D3748;
+  --color-slate-gray-rgb: 45, 55, 72;
+  
+  /* Muted Gray - Tertiary text, captions */
+  --color-muted-gray: #718096;
+  --color-muted-gray-rgb: 113, 128, 150;
+  
+  /* Light Gray - Subtle backgrounds, cards */
+  --color-light-gray: #F7FAFC;
+  --color-light-gray-rgb: 247, 250, 252;
+
+  /* ========================================
+     ACCENT COLORS
+     ======================================== */
+  
+  /* Consensus Green - Verified/consensus indicators */
+  --color-consensus-green: #38A169;
+  --color-consensus-green-rgb: 56, 161, 105;
+  
+  /* Warning Amber - Pending consensus, alerts */
+  --color-warning-amber: #D69E2E;
+  --color-warning-amber-rgb: 214, 158, 46;
+  
+  /* Muted Red - Hover states, dark mode accent */
+  --color-muted-red: #9B2C2C;
+  --color-muted-red-rgb: 155, 44, 44;
+
+  /* ========================================
+     DARK MODE COLORS
+     ======================================== */
+  
+  /* Dark Background - Page background */
+  --color-dark-bg: #0D0D0D;
+  --color-dark-bg-rgb: 13, 13, 13;
+  
+  /* Dark Surface - Cards, elevated surfaces */
+  --color-dark-surface: #1A1A1A;
+  --color-dark-surface-rgb: 26, 26, 26;
+  
+  /* Dark Border - Subtle borders */
+  --color-dark-border: #2D2D2D;
+  --color-dark-border-rgb: 45, 45, 45;
+
+  /* ========================================
+     SEMANTIC ALIASES
+     ======================================== */
+  
+  /* Text */
+  --text-primary: var(--color-deep-black);
+  --text-secondary: var(--color-slate-gray);
+  --text-muted: var(--color-muted-gray);
+  
+  /* Backgrounds */
+  --bg-primary: var(--color-pure-white);
+  --bg-secondary: var(--color-light-gray);
+  --bg-accent: var(--color-signal-red);
+  
+  /* Interactive */
+  --interactive-primary: var(--color-signal-red);
+  --interactive-hover: var(--color-muted-red);
+  --interactive-success: var(--color-consensus-green);
+  --interactive-warning: var(--color-warning-amber);
+  
+  /* Borders */
+  --border-default: var(--color-muted-gray);
+  --border-light: var(--color-light-gray);
+
+  /* ========================================
+     TYPOGRAPHY
+     ======================================== */
+  
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace;
+  
+  /* Font Weights */
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  
+  /* Line Heights */
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* ========================================
+     SPACING & SIZING
+     ======================================== */
+  
+  --spacing-xs: 0.25rem;   /* 4px */
+  --spacing-sm: 0.5rem;    /* 8px */
+  --spacing-md: 1rem;      /* 16px */
+  --spacing-lg: 1.5rem;    /* 24px */
+  --spacing-xl: 2rem;      /* 32px */
+  --spacing-2xl: 3rem;     /* 48px */
+  
+  /* Border Radius */
+  --radius-sm: 0.25rem;    /* 4px */
+  --radius-md: 0.5rem;     /* 8px */
+  --radius-lg: 0.75rem;    /* 12px */
+  --radius-full: 9999px;
+}
+
+/* ========================================
+   DARK MODE OVERRIDES
+   ======================================== */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text-primary: var(--color-pure-white);
+    --text-secondary: var(--color-muted-gray);
+    --text-muted: var(--color-slate-gray);
+    
+    --bg-primary: var(--color-dark-bg);
+    --bg-secondary: var(--color-dark-surface);
+    
+    --border-default: var(--color-dark-border);
+    --border-light: var(--color-dark-border);
+  }
+}
+
+/* Manual dark mode class */
+.dark {
+  --text-primary: var(--color-pure-white);
+  --text-secondary: var(--color-muted-gray);
+  --text-muted: var(--color-slate-gray);
+  
+  --bg-primary: var(--color-dark-bg);
+  --bg-secondary: var(--color-dark-surface);
+  
+  --border-default: var(--color-dark-border);
+  --border-light: var(--color-dark-border);
+}
+
+/* ========================================
+   UTILITY CLASSES
+   ======================================== */
+
+.text-signal { color: var(--color-signal-red); }
+.text-consensus { color: var(--color-consensus-green); }
+.text-warning { color: var(--color-warning-amber); }
+.text-muted { color: var(--text-muted); }
+
+.bg-signal { background-color: var(--color-signal-red); }
+.bg-consensus { background-color: var(--color-consensus-green); }
+.bg-surface { background-color: var(--bg-secondary); }
+
+.border-signal { border-color: var(--color-signal-red); }
