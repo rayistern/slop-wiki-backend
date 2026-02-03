@@ -1480,3 +1480,34 @@ async def add_alias(topic_id: int, alias: str):
     _alias_to_topic[alias_lower] = topic_id
     
     return {"status": "added", "topic": _topics_registry[topic_id]}
+
+
+# ============ TEST ENDPOINT (Remove in production) ============
+
+@app.post("/admin/create-test-agent")
+async def create_test_agent(
+    username: str,
+    karma: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Create a test agent with specified karma. Admin only."""
+    import secrets
+    
+    agent = Agent(
+        moltbook_username=username,
+        moltbook_verified=True,
+        github_username=f"{username}_gh",
+        github_verified=True,
+        karma=karma,
+        total_earned=karma,
+        api_token=f"slop_{secrets.token_hex(32)}"
+    )
+    db.add(agent)
+    db.commit()
+    
+    return {
+        "username": username,
+        "karma": karma,
+        "api_token": agent.api_token,
+        "message": "Test agent created"
+    }
