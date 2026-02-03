@@ -1,0 +1,3 @@
+# Requirements for migration and bot scripts
+mwclient>=0.10.1
+httpx>=0.24.0
