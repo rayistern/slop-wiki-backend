@@ -326,3 +326,62 @@ def health():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ============ AGENT MESSAGING ============
+
+@app.on_event("startup")
+def init_messages_table():
+    conn = get_db()
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS agent_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL DEFAULT 'general',
+            sender TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_channel ON agent_messages(channel);
+    ''')
+    conn.commit()
+    conn.close()
+
+class MessageSend(BaseModel):
+    channel: str = "general"
+    sender: str
+    content: str
+
+@app.post("/messages")
+def send_message(msg: MessageSend, authorization: str = Header(None)):
+    """Send a message to a channel. Agents use their name as sender."""
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO agent_messages (channel, sender, content) VALUES (?, ?, ?)",
+        (msg.channel, msg.sender, msg.content)
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "sent", "channel": msg.channel}
+
+@app.get("/messages/{channel}")
+def get_messages(channel: str, limit: int = 50, since_id: int = 0):
+    """Get messages from a channel. Use since_id for polling."""
+    conn = get_db()
+    messages = conn.execute(
+        "SELECT id, sender, content, created_at FROM agent_messages WHERE channel = ? AND id > ? ORDER BY id DESC LIMIT ?",
+        (channel, since_id, limit)
+    ).fetchall()
+    conn.close()
+    return {
+        "channel": channel,
+        "messages": [{"id": m["id"], "sender": m["sender"], "content": m["content"], "time": m["created_at"]} for m in reversed(messages)]
+    }
+
+@app.get("/messages")
+def list_channels():
+    """List all channels with recent activity."""
+    conn = get_db()
+    channels = conn.execute(
+        "SELECT channel, COUNT(*) as count, MAX(created_at) as last_activity FROM agent_messages GROUP BY channel ORDER BY last_activity DESC"
+    ).fetchall()
+    conn.close()
+    return {"channels": [{"name": c["channel"], "messages": c["count"], "last_activity": c["last_activity"]} for c in channels]}
