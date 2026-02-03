@@ -1039,3 +1039,281 @@ async def reindex_wiki():
             }
         
         return {"status": "no_documents", "documents_sent": 0}
+
+
+# ============ MEILISEARCH CONFIG ============
+
+MEILI_URL = os.getenv("MEILI_URL", "http://meilisearch:7700")
+MEILI_MASTER_KEY = os.getenv("MEILI_MASTER_KEY", "masterkey")
+MEILI_INDEX = "wiki"
+
+
+# ============ SEARCH ENDPOINTS ============
+
+@app.post("/admin/index")
+async def index_wiki_content(
+    authorization: str = Header(None),
+):
+    """
+    Index/reindex all wiki content from MediaWiki into MeiliSearch.
+    Fetches all pages via MediaWiki API and indexes title, content, categories.
+    """
+    if not verify_admin_or_operator(authorization):
+        raise HTTPException(status_code=403, detail="Admin or operator access required")
+    
+    mediawiki_url = os.getenv("MEDIAWIKI_API_URL", "http://mediawiki/api.php")
+    
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Step 1: Get all page titles from MediaWiki
+        all_pages = []
+        apcontinue = None
+        
+        while True:
+            params = {
+                "action": "query",
+                "list": "allpages",
+                "aplimit": "500",
+                "format": "json"
+            }
+            if apcontinue:
+                params["apcontinue"] = apcontinue
+            
+            try:
+                resp = await client.get(mediawiki_url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to fetch page list: {str(e)}")
+            
+            pages = data.get("query", {}).get("allpages", [])
+            all_pages.extend(pages)
+            
+            if "continue" in data:
+                apcontinue = data["continue"].get("apcontinue")
+            else:
+                break
+        
+        if not all_pages:
+            return {"status": "no_pages", "indexed": 0}
+        
+        # Step 2: Fetch content for each page
+        documents = []
+        batch_size = 50
+        page_titles = [p["title"] for p in all_pages]
+        
+        for i in range(0, len(page_titles), batch_size):
+            batch = page_titles[i:i+batch_size]
+            titles_str = "|".join(batch)
+            
+            # Get page content
+            params = {
+                "action": "query",
+                "titles": titles_str,
+                "prop": "revisions|categories",
+                "rvprop": "content",
+                "rvslots": "main",
+                "cllimit": "max",
+                "format": "json"
+            }
+            
+            try:
+                resp = await client.get(mediawiki_url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                continue  # Skip failed batches
+            
+            pages_data = data.get("query", {}).get("pages", {})
+            
+            for page_id, page_info in pages_data.items():
+                if int(page_id) < 0:  # Missing page
+                    continue
+                
+                title = page_info.get("title", "")
+                
+                # Extract content
+                content = ""
+                revisions = page_info.get("revisions", [])
+                if revisions:
+                    slots = revisions[0].get("slots", {})
+                    main_slot = slots.get("main", {})
+                    content = main_slot.get("*", "")
+                
+                # Extract categories
+                categories = []
+                for cat in page_info.get("categories", []):
+                    cat_title = cat.get("title", "")
+                    if cat_title.startswith("Category:"):
+                        categories.append(cat_title[9:])  # Remove "Category:" prefix
+                
+                documents.append({
+                    "id": page_id,
+                    "title": title,
+                    "content": content,
+                    "categories": categories,
+                    "url": f"/wiki/{title.replace(' ', '_')}"
+                })
+        
+        # Step 3: Create/update MeiliSearch index
+        headers = {
+            "Authorization": f"Bearer {MEILI_MASTER_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Create index if it doesn't exist
+        try:
+            await client.post(
+                f"{MEILI_URL}/indexes",
+                headers=headers,
+                json={"uid": MEILI_INDEX, "primaryKey": "id"}
+            )
+        except:
+            pass  # Index may already exist
+        
+        # Configure searchable attributes
+        try:
+            await client.patch(
+                f"{MEILI_URL}/indexes/{MEILI_INDEX}/settings",
+                headers=headers,
+                json={
+                    "searchableAttributes": ["title", "content", "categories"],
+                    "displayedAttributes": ["id", "title", "content", "categories", "url"],
+                    "filterableAttributes": ["categories"],
+                    "rankingRules": [
+                        "words",
+                        "typo",
+                        "proximity",
+                        "attribute",
+                        "sort",
+                        "exactness"
+                    ]
+                }
+            )
+        except Exception as e:
+            print(f"Warning: Failed to configure index settings: {e}")
+        
+        # Index documents
+        try:
+            resp = await client.post(
+                f"{MEILI_URL}/indexes/{MEILI_INDEX}/documents",
+                headers=headers,
+                json=documents
+            )
+            resp.raise_for_status()
+            task_info = resp.json()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to index documents: {str(e)}")
+        
+        return {
+            "status": "indexing",
+            "pages_found": len(all_pages),
+            "documents_indexed": len(documents),
+            "task_uid": task_info.get("taskUid")
+        }
+
+
+@app.get("/search")
+async def search_wiki(
+    q: str,
+    limit: int = 10,
+    offset: int = 0,
+    categories: Optional[str] = None
+):
+    """
+    Search wiki content using MeiliSearch.
+    Fast, typo-tolerant full-text search.
+    
+    Args:
+        q: Search query
+        limit: Max results (default 10)
+        offset: Results offset for pagination
+        categories: Comma-separated category filter
+    """
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+    
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        headers = {
+            "Authorization": f"Bearer {MEILI_MASTER_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        search_body = {
+            "q": q.strip(),
+            "limit": min(limit, 100),
+            "offset": offset,
+            "attributesToHighlight": ["title", "content"],
+            "highlightPreTag": "<mark>",
+            "highlightPostTag": "</mark>",
+            "attributesToCrop": ["content"],
+            "cropLength": 200
+        }
+        
+        # Add category filter if specified
+        if categories:
+            cat_list = [c.strip() for c in categories.split(",") if c.strip()]
+            if cat_list:
+                filter_str = " OR ".join([f'categories = "{c}"' for c in cat_list])
+                search_body["filter"] = filter_str
+        
+        try:
+            resp = await client.post(
+                f"{MEILI_URL}/indexes/{MEILI_INDEX}/search",
+                headers=headers,
+                json=search_body
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        except httpx.ConnectError:
+            raise HTTPException(status_code=503, detail="Search service unavailable")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # Index doesn't exist yet
+                return {
+                    "query": q,
+                    "hits": [],
+                    "total": 0,
+                    "message": "Search index not built yet. Run POST /admin/index first."
+                }
+            raise HTTPException(status_code=500, detail=f"Search failed: {e.response.text}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        
+        # Format results
+        hits = []
+        for hit in result.get("hits", []):
+            formatted = hit.get("_formatted", {})
+            hits.append({
+                "id": hit.get("id"),
+                "title": hit.get("title"),
+                "url": hit.get("url"),
+                "categories": hit.get("categories", []),
+                "snippet": formatted.get("content", hit.get("content", "")[:200])
+            })
+        
+        return {
+            "query": q,
+            "hits": hits,
+            "total": result.get("estimatedTotalHits", len(hits)),
+            "processingTimeMs": result.get("processingTimeMs"),
+            "limit": limit,
+            "offset": offset
+        }
+
+
+@app.get("/search/stats")
+async def search_stats():
+    """Get MeiliSearch index statistics."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        headers = {"Authorization": f"Bearer {MEILI_MASTER_KEY}"}
+        
+        try:
+            resp = await client.get(f"{MEILI_URL}/indexes/{MEILI_INDEX}/stats", headers=headers)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return {"status": "index_not_found", "message": "Run POST /admin/index first"}
+            raise HTTPException(status_code=500, detail=f"Failed to get stats: {e.response.text}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))

@@ -8,6 +8,8 @@ services:
     environment:
       - DATABASE_URL=sqlite:///./data/slop.db
       - MEDIAWIKI_API_URL=http://mediawiki/api.php
+      - MEDIAWIKI_BOT_USER=${MEDIAWIKI_BOT_USER:-SlopBot@automation}
+      - MEDIAWIKI_BOT_PASSWORD=${MEDIAWIKI_BOT_PASSWORD}
       - MEILI_URL=http://meilisearch:7700
       - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-masterkey}
     depends_on:
