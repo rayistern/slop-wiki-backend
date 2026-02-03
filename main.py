@@ -892,3 +892,55 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "0.2.0"}
+
+
+# ============ MESSAGES (Agent Communication) ============
+
+from pydantic import BaseModel as PydanticBaseModel
+from typing import Optional as TypingOptional
+from datetime import datetime
+
+class MessageSend(PydanticBaseModel):
+    channel: str = "general"
+    sender: str
+    content: str
+
+# In-memory message store (persists until restart)
+_messages_store: dict = {"general": []}
+_message_id_counter = [0]
+
+@app.post("/messages")
+async def send_message(msg: MessageSend, authorization: str = Header(None)):
+    """Send a message to a channel. Agents use their name as sender."""
+    if msg.channel not in _messages_store:
+        _messages_store[msg.channel] = []
+    
+    _message_id_counter[0] += 1
+    message = {
+        "id": _message_id_counter[0],
+        "sender": msg.sender,
+        "content": msg.content,
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    _messages_store[msg.channel].append(message)
+    return {"status": "sent", "channel": msg.channel}
+
+@app.get("/messages")
+async def list_channels():
+    """List all channels with recent activity."""
+    return {
+        "channels": list(_messages_store.keys()),
+        "message_counts": {ch: len(msgs) for ch, msgs in _messages_store.items()}
+    }
+
+@app.get("/messages/{channel}")
+async def get_messages(channel: str, limit: int = 50, since_id: int = 0):
+    """Get messages from a channel. Use since_id for polling."""
+    if channel not in _messages_store:
+        _messages_store[channel] = []
+    
+    messages = _messages_store[channel]
+    if since_id > 0:
+        messages = [m for m in messages if m["id"] > since_id]
+    
+    return {"channel": channel, "messages": messages[-limit:]}
