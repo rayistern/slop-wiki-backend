@@ -4,6 +4,7 @@
     "author": "slop.wiki",
     "description": "Gates wiki content based on slop.wiki karma",
     "type": "other",
+    "manifest_version": 2,
     "requires": {
         "MediaWiki": ">= 1.39.0"
     },
