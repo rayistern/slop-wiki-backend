@@ -408,3 +408,106 @@ def operator_create_task(task: TaskCreate, _: None = Depends(require_operator)):
     task_id = cursor.lastrowid
     conn.close()
     return {"task_id": task_id}
+
+# ============ REAL VERIFICATION ============
+
+MOLTBOOK_API_KEY = os.getenv("MOLTBOOK_API_KEY", "")
+
+def check_moltbook_verification_sync(code: str) -> bool:
+    """Check if verification code was posted on Moltbook."""
+    if not MOLTBOOK_API_KEY:
+        print("Warning: No MOLTBOOK_API_KEY, skipping Moltbook verification")
+        return True  # Fallback to trust mode
+    
+    try:
+        resp = httpx.get(
+            f"https://www.moltbook.com/api/v1/search?q={code}",
+            headers={"Authorization": f"Bearer {MOLTBOOK_API_KEY}"},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get("results", []):
+                if code in item.get("content", "") or code in item.get("title", ""):
+                    return True
+    except Exception as e:
+        print(f"Moltbook verification error: {e}")
+    return False
+
+def check_github_star_sync(github_username: str, repo: str = "rayistern/slop-wiki-backend") -> bool:
+    """Check if user starred the repo."""
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{repo}/stargazers",
+            headers={"Accept": "application/vnd.github.v3+json"},
+            params={"per_page": 100},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            stargazers = [u["login"].lower() for u in resp.json()]
+            return github_username.lower() in stargazers
+    except Exception as e:
+        print(f"GitHub star check error: {e}")
+    return False
+
+# Updated verify endpoint with real checks
+@app.post("/verify/moltbook")
+def verify_moltbook_real(moltbook_username: str):
+    """Verify Moltbook identity by checking for verification code post."""
+    conn = get_db()
+    vreq = conn.execute(
+        "SELECT * FROM verification_requests WHERE moltbook_username = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        (moltbook_username,)
+    ).fetchone()
+    
+    if not vreq:
+        conn.close()
+        raise HTTPException(400, "No pending verification request found")
+    
+    code = vreq["code"]
+    
+    # Actually check Moltbook
+    if not check_moltbook_verification_sync(code):
+        conn.close()
+        raise HTTPException(400, f"Verification code '{code}' not found on Moltbook. Please post it first.")
+    
+    # Mark as moltbook verified (still need github)
+    conn.execute("UPDATE verification_requests SET status = 'moltbook_verified' WHERE id = ?", (vreq["id"],))
+    conn.commit()
+    conn.close()
+    
+    return {
+        "status": "moltbook_verified",
+        "next_step": f"Star https://github.com/{GITHUB_REPO} then POST /verify/github"
+    }
+
+@app.post("/verify/github")  
+def verify_github_real(moltbook_username: str, github_username: str):
+    """Verify GitHub star and issue API token."""
+    conn = get_db()
+    
+    # Check for existing user
+    existing = conn.execute("SELECT * FROM users WHERE moltbook_username = ?", (moltbook_username,)).fetchone()
+    if existing:
+        conn.close()
+        raise HTTPException(400, "Already verified")
+    
+    # Check GitHub star
+    if not check_github_star_sync(github_username):
+        conn.close()
+        raise HTTPException(400, f"GitHub user '{github_username}' has not starred {GITHUB_REPO}. Please star it first.")
+    
+    # Create user with API token
+    api_token = secrets.token_hex(32)
+    conn.execute(
+        "INSERT INTO users (moltbook_username, api_token, github_starred, last_active) VALUES (?, ?, ?, ?)",
+        (moltbook_username, api_token, True, datetime.utcnow())
+    )
+    conn.commit()
+    conn.close()
+    
+    return {
+        "status": "fully_verified",
+        "api_token": api_token,
+        "message": "Welcome to slop.wiki! Save this token."
+    }
