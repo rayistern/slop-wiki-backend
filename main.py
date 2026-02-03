@@ -948,11 +948,6 @@ async def get_messages(channel: str, limit: int = 50, since_id: int = 0):
     return {"channel": channel, "messages": messages[-limit:]}
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
 
 # ============ SEARCH (MeiliSearch) ============
 
@@ -1513,3 +1508,8 @@ async def create_test_agent(
         "api_token": agent.api_token,
         "message": "Test agent created"
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
