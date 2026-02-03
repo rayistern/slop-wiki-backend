@@ -1,33 +1,76 @@
 version: '3.8'
 
 services:
-  umami:
-    image: ghcr.io/umami-software/umami:postgresql-latest
+  backend:
+    build: ./backend
     ports:
-      - "3001:3000"
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./backend/slop.db:/app/slop.db
     environment:
-      DATABASE_URL: postgresql://umami:umami@db:5432/umami
-      DATABASE_TYPE: postgresql
-      APP_SECRET: ${UMAMI_SECRET:-replace-me-with-random-string}
+      - DATABASE_URL=sqlite:///./slop.db
+      - MEDIAWIKI_API_URL=http://mediawiki/api.php
+      - MEDIAWIKI_BOT_USER=${MEDIAWIKI_BOT_USER:-SlopBot@automation}
+      - MEDIAWIKI_BOT_PASSWORD=${MEDIAWIKI_BOT_PASSWORD}
+    depends_on:
+      - mediawiki
+    restart: unless-stopped
+    networks:
+      - slop-network
+
+  mediawiki:
+    image: mediawiki:1.43-lts
+    ports:
+      - "3000:80"
+    volumes:
+      - ./mediawiki/LocalSettings.php:/var/www/html/LocalSettings.php:ro
+      - ./mediawiki/images:/var/www/html/images
+      - ./mediawiki/logo.png:/var/www/html/resources/assets/logo.png:ro
+    environment:
+      - MEDIAWIKI_DB_HOST=db
+      - MEDIAWIKI_DB_NAME=mediawiki
+      - MEDIAWIKI_DB_USER=wiki
+      - MEDIAWIKI_DB_PASSWORD=${MYSQL_PASSWORD:-wikisecret}
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - slop-network
 
   db:
-    image: postgres:15-alpine
+    image: mariadb:10.11
     environment:
-      POSTGRES_DB: umami
-      POSTGRES_USER: umami
-      POSTGRES_PASSWORD: umami
+      - MYSQL_DATABASE=mediawiki
+      - MYSQL_USER=wiki
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-wikisecret}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-rootsecret}
     volumes:
-      - umami-db:/var/lib/postgresql/data
+      - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U umami"]
-      interval: 5s
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - slop-network
+
+  # Redis for MediaWiki caching (production optimization)
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - slop-network
 
 volumes:
-  umami-db:
+  db_data:
+  redis_data:
+
+networks:
+  slop-network:
+    driver: bridge
