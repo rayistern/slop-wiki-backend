@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -20,7 +20,7 @@ jobs:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
+          port: 22
           script: |
             cd /opt/slop-wiki
             
@@ -28,11 +28,19 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             
+            # Ensure branding is configured in LocalSettings.php
+            if ! grep -q "wgLogo" mediawiki/LocalSettings.php 2>/dev/null; then
+              echo '' >> mediawiki/LocalSettings.php
+              echo '## Branding' >> mediawiki/LocalSettings.php
+              echo '$wgLogo = "/logo.svg";' >> mediawiki/LocalSettings.php
+              echo '$wgFavicon = "/favicon.ico";' >> mediawiki/LocalSettings.php
+            fi
+            
             # Stop old containers gracefully
-            docker-compose down --timeout 30
+            docker compose down --timeout 30 || docker-compose down --timeout 30
             
             # Rebuild and start
-            docker-compose up -d --build
+            docker compose up -d --build || docker-compose up -d --build
             
             # Wait for services to be healthy
             sleep 10
@@ -46,7 +54,6 @@ jobs:
         if: failure()
         run: |
           echo "Deployment failed! Check the logs."
-          # Add notification webhook here if needed
 
   audit-export:
     runs-on: ubuntu-latest
@@ -61,6 +68,5 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            # Trigger daily audit export after successful deploy
             curl -X POST http://localhost:8000/admin/export \
               -H "Authorization: Bearer ${{ secrets.BACKEND_ADMIN_KEY }}"
