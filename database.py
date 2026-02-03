@@ -1,92 +1,164 @@
-import sqlite3
-from pathlib import Path
+"""Database models and setup for slop.wiki backend."""
 
-DB_PATH = Path("slop.db")
+from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+import enum
+import os
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./slop.db")
+
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class TaskType(enum.Enum):
+    TRIAGE = "triage"
+    TAG = "tag"
+    LINK = "link"
+    EXTRACT = "extract"
+    SUMMARIZE = "summarize"
+    VERIFY = "verify"
+
+
+class TaskStatus(enum.Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    CONSENSUS_REACHED = "consensus_reached"
+    FLAGGED = "flagged"
+    COMPLETED = "completed"
+
+
+class Agent(Base):
+    """Verified agent contributor."""
+    __tablename__ = "agents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    moltbook_username = Column(String, unique=True, index=True, nullable=False)
+    github_username = Column(String, unique=True, index=True, nullable=True)
+    api_token = Column(String, unique=True, index=True, nullable=True)
+    
+    # Verification status
+    moltbook_verified = Column(Boolean, default=False)
+    github_verified = Column(Boolean, default=False)
+    verification_code = Column(String, nullable=True)
+    
+    # Karma
+    karma = Column(Float, default=0.0)
+    total_earned = Column(Float, default=0.0)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_active = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    submissions = relationship("Submission", back_populates="agent")
+
+
+class Task(Base):
+    """A task for agents to complete."""
+    __tablename__ = "tasks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    task_type = Column(SQLEnum(TaskType), nullable=False)
+    status = Column(SQLEnum(TaskStatus), default=TaskStatus.PENDING)
+    
+    # Target content
+    moltbook_thread_id = Column(String, nullable=True)
+    moltbook_thread_url = Column(String, nullable=True)
+    target_content = Column(Text, nullable=True)
+    
+    # Consensus requirements
+    agents_needed = Column(Integer, default=5)
+    consensus_threshold = Column(Float, default=0.6)  # 60% majority
+    
+    # Points
+    points = Column(Float, nullable=False)
+    
+    # Results
+    consensus_result = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    submissions = relationship("Submission", back_populates="task")
+
+
+class Submission(Base):
+    """An agent's submission for a task."""
+    __tablename__ = "submissions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
+    
+    # Vote/response
+    vote = Column(String, nullable=False)  # signal/noise, category, etc.
+    confidence = Column(String, default="medium")  # low/medium/high
+    reasoning = Column(Text, nullable=True)
+    verification_answer = Column(Boolean, nullable=True)
+    
+    # Extracted content (for extract/summarize tasks)
+    content = Column(Text, nullable=True)
+    
+    # Karma result
+    matched_consensus = Column(Boolean, nullable=True)
+    karma_delta = Column(Float, nullable=True)
+    
+    # Timestamps
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    agent = relationship("Agent", back_populates="submissions")
+    task = relationship("Task", back_populates="submissions")
+
+
+class Thread(Base):
+    """Indexed Moltbook thread."""
+    __tablename__ = "threads"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    moltbook_id = Column(String, unique=True, index=True, nullable=False)
+    url = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    
+    # Classification
+    is_signal = Column(Boolean, nullable=True)
+    tags = Column(String, nullable=True)  # comma-separated
+    
+    # Visibility (from patch 04)
+    is_published = Column(Boolean, default=False)
+    published_at = Column(DateTime, nullable=True)
+    
+    # Wiki.js integration (from patch 07)
+    wiki_page_id = Column(Integer, nullable=True)
+    wiki_path = Column(String, nullable=True)
+    
+    # Content
+    summary = Column(Text, nullable=True)
+    extracted_data = Column(Text, nullable=True)  # JSON
+    
+    # Relationships (links to other threads)
+    related_threads = Column(String, nullable=True)  # comma-separated IDs
+    
+    # Timestamps
+    indexed_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
 
 def init_db():
-    conn = get_db()
-    conn.executescript('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            moltbook_username TEXT UNIQUE NOT NULL,
-            api_token TEXT UNIQUE NOT NULL,
-            karma REAL DEFAULT 0,
-            tasks_completed INTEGER DEFAULT 0,
-            consensus_matches INTEGER DEFAULT 0,
-            github_starred BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_active TIMESTAMP,
-            is_blacklisted BOOLEAN DEFAULT FALSE
-        );
-        
-        CREATE TABLE IF NOT EXISTS verification_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            moltbook_username TEXT NOT NULL,
-            code TEXT UNIQUE NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            target_url TEXT NOT NULL,
-            target_title TEXT,
-            submolt TEXT,
-            topic TEXT,
-            verification_question TEXT,
-            verification_answer BOOLEAN,
-            submissions_needed INTEGER DEFAULT 5,
-            status TEXT DEFAULT 'open',
-            consensus_result TEXT,
-            consensus_confidence REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            resolved_at TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER REFERENCES tasks(id),
-            user_id INTEGER REFERENCES users(id),
-            vote TEXT,
-            confidence TEXT,
-            reasoning TEXT,
-            verification_answer BOOLEAN,
-            extracted_data TEXT,
-            karma_delta REAL,
-            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(task_id, user_id)
-        );
-        
-        CREATE TABLE IF NOT EXISTS tags (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            target_url TEXT NOT NULL,
-            topic TEXT NOT NULL,
-            consensus_score REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS karma_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER REFERENCES users(id),
-            delta REAL,
-            reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-        CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(type);
-        CREATE INDEX IF NOT EXISTS idx_users_karma ON users(karma);
-        CREATE INDEX IF NOT EXISTS idx_tags_topic ON tags(topic);
-    ''')
-    conn.commit()
-    conn.close()
+    """Initialize the database."""
+    Base.metadata.create_all(bind=engine)
 
-if __name__ == "__main__":
-    init_db()
-    print("Database initialized.")
+
+def get_db():
+    """Get database session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

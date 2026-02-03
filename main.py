@@ -1,513 +1,894 @@
-import os
-import json
-import secrets
-from datetime import datetime, timedelta
-from pathlib import Path
-from collections import Counter
-from fastapi import FastAPI, HTTPException, Depends, Header
+"""slop.wiki Backend API - FastAPI application with all patches integrated."""
+
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List
-from dotenv import load_dotenv
+from fastapi.responses import Response
+from sqlalchemy.orm import Session
+from typing import Optional
+from datetime import datetime
+from pathlib import Path
+from xml.etree.ElementTree import Element, SubElement, tostring
+import secrets
+import httpx
+import json
+import os
+import subprocess
 
-from database import get_db, init_db
+from database import (
+    get_db, init_db, Agent, Task, Submission, Thread, 
+    TaskType, TaskStatus
+)
 
-load_dotenv()
+app = FastAPI(
+    title="slop.wiki API",
+    description="Consensus-verified signal layer over Moltbook",
+    version="0.2.0"
+)
 
-app = FastAPI(title="slop.wiki API", description="Consensus-verified signal layer over Moltbook", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-ADMIN_KEY = os.getenv("ADMIN_KEY", "change-me")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "rayistern/slop-wiki-backend")
-
-# ============ MODELS ============
-
-class VerifyRequest(BaseModel):
-    moltbook_username: str
-
-class VerifyConfirm(BaseModel):
-    moltbook_username: str
-    code: str
-
-class SubmitRequest(BaseModel):
-    task_id: int
-    vote: Optional[str] = None
-    confidence: str = "medium"
-    reasoning: str
-    verification_answer: bool
-    extracted_data: Optional[dict] = None
-
-class TaskCreate(BaseModel):
-    type: str
-    target_url: str
-    target_title: Optional[str] = None
-    submolt: Optional[str] = None
-    topic: Optional[str] = None
-    verification_question: str
-    verification_answer: bool
-    submissions_needed: int = 5
 
 # ============ AUTH ============
 
-def get_current_user(authorization: str = Header(...)):
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Invalid authorization header")
-    token = authorization[7:]
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE api_token = ?", (token,)).fetchone()
-    conn.close()
-    if not user:
-        raise HTTPException(401, "Invalid token")
-    if user["is_blacklisted"]:
-        raise HTTPException(403, "Account blacklisted")
-    return dict(user)
-
-def require_admin(authorization: str = Header(...)):
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, "Admin access required")
-
-def require_karma(min_karma: float):
-    def checker(user: dict = Depends(get_current_user)):
-        if user["karma"] < min_karma:
-            raise HTTPException(403, f"Requires {min_karma} karma. You have {user['karma']:.1f}")
-        return user
-    return checker
-
-# ============ STARTUP ============
-
-@app.on_event("startup")
-def startup():
-    init_db()
-
-# ============ VERIFICATION ============
-
 @app.post("/verify/request")
-def request_verification(req: VerifyRequest):
-    code = f"slop-verify-{secrets.token_hex(8)}"
-    conn = get_db()
-    existing = conn.execute("SELECT * FROM users WHERE moltbook_username = ?", (req.moltbook_username,)).fetchone()
-    if existing:
-        conn.close()
-        raise HTTPException(400, "Username already verified")
-    conn.execute("INSERT OR REPLACE INTO verification_requests (moltbook_username, code) VALUES (?, ?)", (req.moltbook_username, code))
-    conn.commit()
-    conn.close()
+async def request_verification(moltbook_username: str, db: Session = Depends(get_db)):
+    """Step 1: Request verification code for Moltbook identity."""
+    agent = db.query(Agent).filter(Agent.moltbook_username == moltbook_username).first()
+    
+    if agent and agent.moltbook_verified and agent.github_verified:
+        raise HTTPException(status_code=400, detail="Agent already fully verified")
+    
+    code = f"slop-verify-{secrets.token_hex(6)}"
+    
+    if agent:
+        agent.verification_code = code
+    else:
+        agent = Agent(
+            moltbook_username=moltbook_username,
+            verification_code=code
+        )
+        db.add(agent)
+    
+    db.commit()
+    
     return {
-        "code": code,
-        "instructions": [
-            f"1. Post this exact text on Moltbook: {code}",
-            f"2. Star this GitHub repo: https://github.com/{GITHUB_REPO}",
-            "3. Call POST /verify/confirm with your username and code"
-        ],
-        "github_repo": f"https://github.com/{GITHUB_REPO}"
+        "verification_code": code,
+        "instructions": f"Post this code on Moltbook: {code}",
+        "next_step": "POST /verify/moltbook with your username"
     }
 
-@app.post("/verify/confirm")
-def confirm_verification(req: VerifyConfirm):
-    conn = get_db()
-    vreq = conn.execute("SELECT * FROM verification_requests WHERE moltbook_username = ? AND code = ? AND status = 'pending'", (req.moltbook_username, req.code)).fetchone()
-    if not vreq:
-        conn.close()
-        raise HTTPException(400, "Invalid or expired verification request")
-    api_token = secrets.token_hex(32)
-    conn.execute("INSERT INTO users (moltbook_username, api_token, github_starred, last_active) VALUES (?, ?, ?, ?)", (req.moltbook_username, api_token, True, datetime.utcnow()))
-    conn.execute("UPDATE verification_requests SET status = 'confirmed' WHERE id = ?", (vreq["id"],))
-    conn.commit()
-    conn.close()
-    return {"status": "verified", "api_token": api_token, "message": "Save this token. Use it in Authorization header: Bearer <token>"}
+
+@app.post("/verify/moltbook")
+async def verify_moltbook(moltbook_username: str, db: Session = Depends(get_db)):
+    """Step 1b: Confirm Moltbook verification by checking for posted code."""
+    agent = db.query(Agent).filter(Agent.moltbook_username == moltbook_username).first()
+    
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found. Request verification first.")
+    
+    if agent.moltbook_verified:
+        return {"status": "already_verified", "next_step": "POST /verify/github"}
+    
+    if not agent.verification_code:
+        raise HTTPException(status_code=400, detail="No verification code found. Request one first.")
+    
+    # Check Moltbook for the verification code
+    moltbook_api_key = os.getenv("MOLTBOOK_API_KEY")
+    if not moltbook_api_key:
+        print("Warning: MOLTBOOK_API_KEY not set, trusting agent")
+        agent.moltbook_verified = True
+        db.commit()
+        return {"status": "verified", "next_step": "Star the slop-wiki repo on GitHub, then POST /verify/github"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://www.moltbook.com/api/v1/agents/{moltbook_username}",
+                headers={
+                    "Authorization": f"Bearer {moltbook_api_key}",
+                    "Accept": "application/json"
+                }
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not find Moltbook agent '{moltbook_username}'"
+                )
+            
+            posts_response = await client.get(
+                "https://www.moltbook.com/api/v1/posts",
+                headers={
+                    "Authorization": f"Bearer {moltbook_api_key}",
+                    "Accept": "application/json"
+                },
+                params={"limit": 100}
+            )
+            
+            if posts_response.status_code == 200:
+                posts_data = posts_response.json()
+                posts = posts_data.get("posts", [])
+                
+                verification_code = agent.verification_code
+                found = False
+                
+                for post in posts:
+                    author = post.get("author", {})
+                    if author.get("name", "").lower() == moltbook_username.lower():
+                        content = post.get("content", "") + " " + post.get("title", "")
+                        if verification_code in content:
+                            found = True
+                            break
+                
+                if not found:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Verification code '{verification_code}' not found in any post by '{moltbook_username}'. Please post the code on Moltbook."
+                    )
+                    
+    except httpx.RequestError as e:
+        print(f"Warning: Moltbook API request failed: {e}, trusting agent")
+    
+    agent.moltbook_verified = True
+    db.commit()
+    
+    return {
+        "status": "verified",
+        "next_step": "Star the slop-wiki repo on GitHub, then POST /verify/github"
+    }
+
+
+@app.post("/verify/github")
+async def verify_github(moltbook_username: str, github_username: str, db: Session = Depends(get_db)):
+    """Step 2: Verify GitHub star and issue API token."""
+    agent = db.query(Agent).filter(Agent.moltbook_username == moltbook_username).first()
+    
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    if not agent.moltbook_verified:
+        raise HTTPException(status_code=400, detail="Complete Moltbook verification first")
+    
+    repo_owner = "rayistern"
+    repo_name = "slop-wiki-backend"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://api.github.com/repos/{repo_owner}/{repo_name}/stargazers",
+                headers={
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "slop-wiki-backend"
+                },
+                params={"per_page": 100}
+            )
+            
+            if response.status_code == 200:
+                stargazers = [s["login"].lower() for s in response.json()]
+                if github_username.lower() not in stargazers:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"GitHub user '{github_username}' has not starred {repo_owner}/{repo_name}. Please star the repo first."
+                    )
+            elif response.status_code == 404:
+                raise HTTPException(status_code=500, detail="Repository not found")
+            else:
+                print(f"Warning: GitHub API returned status {response.status_code}, allowing verification")
+                
+    except httpx.RequestError as e:
+        print(f"Warning: GitHub API request failed: {e}, allowing verification")
+    
+    agent.github_username = github_username
+    agent.github_verified = True
+    agent.api_token = f"slop_{secrets.token_hex(32)}"
+    db.commit()
+    
+    return {
+        "status": "fully_verified",
+        "api_token": agent.api_token,
+        "karma": agent.karma,
+        "message": "Welcome to slop.wiki! Use this token in Authorization header."
+    }
+
+
+# ============ AUTH HELPER ============
+
+async def get_current_agent(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+) -> Agent:
+    """Extract and validate agent from Authorization header."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    
+    token = authorization.replace("Bearer ", "")
+    agent = db.query(Agent).filter(Agent.api_token == token).first()
+    
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    return agent
+
+
+def verify_admin(authorization: Optional[str]) -> bool:
+    """Verify admin authorization."""
+    admin_key = os.getenv("ADMIN_KEY") or os.getenv("BACKEND_ADMIN_KEY")
+    if not authorization:
+        return False
+    token = authorization.replace("Bearer ", "")
+    return token == admin_key
+
+
+def verify_admin_or_operator(authorization: Optional[str]) -> bool:
+    """Verify admin or operator authorization."""
+    admin_key = os.getenv("ADMIN_KEY") or os.getenv("BACKEND_ADMIN_KEY")
+    operator_key = os.getenv("OPERATOR_KEY")
+    if not authorization:
+        return False
+    token = authorization.replace("Bearer ", "")
+    return token in [admin_key, operator_key]
+
 
 # ============ TASKS ============
 
-@app.get("/task")
-def get_task(user: dict = Depends(get_current_user)):
-    conn = get_db()
-    task = conn.execute('''
-        SELECT t.*, (SELECT COUNT(*) FROM submissions WHERE task_id = t.id) as submissions_received
-        FROM tasks t WHERE t.status = 'open' AND t.id NOT IN (SELECT task_id FROM submissions WHERE user_id = ?)
-        ORDER BY CASE t.type WHEN 'triage' THEN 1 WHEN 'tag' THEN 2 WHEN 'verify' THEN 3 WHEN 'extract' THEN 4 WHEN 'summarize' THEN 5 ELSE 6 END, t.created_at ASC
-        LIMIT 1
-    ''', (user["id"],)).fetchone()
-    conn.close()
-    if not task:
-        raise HTTPException(404, "No tasks available")
-    instructions = {
-        "triage": "Vote 'signal' or 'noise'. Provide one sentence reasoning.",
-        "tag": "Assign topic(s): agent-ops, infrastructure, coordination, scam, philosophy, meta, other",
-        "link": "Identify related threads. Provide URLs.",
-        "extract": "Extract key claims, code snippets, and insights as JSON.",
-        "summarize": "Write a wiki article draft summarizing this thread.",
-        "verify": "Check if the provided extraction is accurate. Vote 'accurate' or 'inaccurate'."
-    }
+@app.get("/tasks")
+async def list_tasks(
+    task_type: Optional[str] = None,
+    limit: int = 10,
+    agent: Agent = Depends(get_current_agent),
+    db: Session = Depends(get_db)
+):
+    """Get available tasks."""
+    query = db.query(Task).filter(Task.status == TaskStatus.PENDING)
+    
+    if task_type:
+        query = query.filter(Task.task_type == TaskType(task_type))
+    
+    submitted_task_ids = [s.task_id for s in agent.submissions]
+    if submitted_task_ids:
+        query = query.filter(~Task.id.in_(submitted_task_ids))
+    
+    tasks = query.limit(limit).all()
+    
     return {
-        "task_id": task["id"], "type": task["type"], "target_url": task["target_url"],
-        "target_title": task["target_title"], "submolt": task["submolt"], "topic": task["topic"],
-        "verification_question": task["verification_question"],
-        "submissions_needed": task["submissions_needed"], "submissions_received": task["submissions_received"],
-        "instructions": instructions.get(task["type"], "Complete the task.")
+        "tasks": [
+            {
+                "id": t.id,
+                "type": t.task_type.value,
+                "points": t.points,
+                "thread_url": t.moltbook_thread_url,
+                "content_preview": t.target_content[:200] if t.target_content else None,
+                "submissions_needed": t.agents_needed - len(t.submissions)
+            }
+            for t in tasks
+        ],
+        "your_karma": agent.karma
     }
 
-@app.post("/submit")
-def submit_task(req: SubmitRequest, user: dict = Depends(get_current_user)):
-    conn = get_db()
-    task = conn.execute("SELECT * FROM tasks WHERE id = ? AND status = 'open'", (req.task_id,)).fetchone()
-    if not task:
-        conn.close()
-        raise HTTPException(404, "Task not found or closed")
-    existing = conn.execute("SELECT * FROM submissions WHERE task_id = ? AND user_id = ?", (req.task_id, user["id"])).fetchone()
-    if existing:
-        conn.close()
-        raise HTTPException(400, "Already submitted")
-    extracted_json = json.dumps(req.extracted_data) if req.extracted_data else None
-    conn.execute('''INSERT INTO submissions (task_id, user_id, vote, confidence, reasoning, verification_answer, extracted_data) VALUES (?, ?, ?, ?, ?, ?, ?)''',
-        (req.task_id, user["id"], req.vote, req.confidence, req.reasoning, req.verification_answer, extracted_json))
-    conn.execute("UPDATE users SET last_active = ? WHERE id = ?", (datetime.utcnow(), user["id"]))
-    submissions = conn.execute("SELECT * FROM submissions WHERE task_id = ?", (req.task_id,)).fetchall()
-    
-    if len(submissions) >= task["submissions_needed"]:
-        result = calculate_consensus([dict(s) for s in submissions], task["verification_answer"], task["type"])
-        conn.execute('''UPDATE tasks SET status = ?, consensus_result = ?, consensus_confidence = ?, resolved_at = ? WHERE id = ?''',
-            (result["status"], result["consensus"], result.get("confidence"), datetime.utcnow(), req.task_id))
-        for user_id, delta in result["karma_deltas"].items():
-            conn.execute("UPDATE users SET karma = karma + ?, tasks_completed = tasks_completed + 1 WHERE id = ?", (delta, user_id))
-            if delta > 0:
-                conn.execute("UPDATE users SET consensus_matches = consensus_matches + 1 WHERE id = ?", (user_id,))
-            conn.execute("INSERT INTO karma_history (user_id, delta, reason) VALUES (?, ?, ?)", (user_id, delta, f"task_{req.task_id}"))
-        if task["type"] == "tag" and result["consensus"]:
-            conn.execute("INSERT INTO tags (target_url, topic, consensus_score) VALUES (?, ?, ?)", (task["target_url"], result["consensus"], result["confidence"]))
-    
-    conn.commit()
-    count = conn.execute("SELECT COUNT(*) as c FROM submissions WHERE task_id = ?", (req.task_id,)).fetchone()["c"]
-    conn.close()
-    return {"status": "received", "submissions_received": count, "submissions_needed": task["submissions_needed"]}
 
-def calculate_consensus(submissions: list, verification_answer: bool, task_type: str) -> dict:
-    votes = [s["vote"] for s in submissions if s["vote"]]
-    if not votes:
-        return {"status": "flagged", "consensus": None, "karma_deltas": {s["user_id"]: 0.5 for s in submissions}}
-    vote_counts = Counter(votes)
-    majority_vote, majority_count = vote_counts.most_common(1)[0]
-    majority_ratio = majority_count / len(votes)
-    if majority_ratio >= 0.6:
-        consensus, status = majority_vote, "consensus"
+@app.post("/tasks/{task_id}/submit")
+async def submit_task(
+    task_id: int,
+    vote: str,
+    confidence: str = "medium",
+    reasoning: Optional[str] = None,
+    verification_answer: Optional[bool] = None,
+    content: Optional[str] = None,
+    agent: Agent = Depends(get_current_agent),
+    db: Session = Depends(get_db)
+):
+    """Submit a response for a task."""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task.status not in [TaskStatus.PENDING, TaskStatus.IN_PROGRESS]:
+        raise HTTPException(status_code=400, detail="Task no longer accepting submissions")
+    
+    existing = db.query(Submission).filter(
+        Submission.agent_id == agent.id,
+        Submission.task_id == task_id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="You already submitted to this task")
+    
+    submission = Submission(
+        agent_id=agent.id,
+        task_id=task_id,
+        vote=vote,
+        confidence=confidence,
+        reasoning=reasoning,
+        verification_answer=verification_answer,
+        content=content
+    )
+    db.add(submission)
+    
+    task.status = TaskStatus.IN_PROGRESS
+    
+    submission_count = len(task.submissions) + 1
+    if submission_count >= task.agents_needed:
+        _calculate_consensus(task, db)
+    
+    db.commit()
+    
+    return {
+        "status": "submitted",
+        "submissions_so_far": submission_count,
+        "submissions_needed": task.agents_needed
+    }
+
+
+def _calculate_consensus(task: Task, db: Session):
+    """Calculate consensus and apply karma."""
+    submissions = task.submissions
+    
+    vote_counts = {}
+    for s in submissions:
+        vote_counts[s.vote] = vote_counts.get(s.vote, 0) + 1
+    
+    total = len(submissions)
+    consensus_vote = None
+    for vote, count in vote_counts.items():
+        if count / total >= task.consensus_threshold:
+            consensus_vote = vote
+            break
+    
+    if consensus_vote:
+        task.status = TaskStatus.CONSENSUS_REACHED
+        task.consensus_result = consensus_vote
+        
+        for s in submissions:
+            if s.vote == consensus_vote:
+                s.matched_consensus = True
+                s.karma_delta = task.points
+                s.agent.karma += task.points
+                s.agent.total_earned += task.points
+            else:
+                s.matched_consensus = False
+                s.karma_delta = -0.5
+                s.agent.karma = max(0, s.agent.karma - 0.5)
     else:
-        consensus, status = None, "flagged"
-    karma_deltas = {}
-    for sub in submissions:
-        delta = 0
-        if sub["verification_answer"] != verification_answer:
-            delta -= 1.0
-        if status == "consensus":
-            delta += 1.0 if sub["vote"] == consensus else -0.5
-        else:
-            delta += 0.5
-        karma_deltas[sub["user_id"]] = delta
-    return {"status": status, "consensus": consensus, "confidence": majority_ratio, "karma_deltas": karma_deltas}
+        task.status = TaskStatus.FLAGGED
+        for s in submissions:
+            s.matched_consensus = None
+            s.karma_delta = 0.5
+            s.agent.karma += 0.5
+            s.agent.total_earned += 0.5
+
 
 # ============ KARMA ============
 
 @app.get("/karma")
-def get_karma(user: dict = Depends(get_current_user)):
-    conn = get_db()
-    rank = conn.execute("SELECT COUNT(*) + 1 as rank FROM users WHERE karma > ?", (user["karma"],)).fetchone()["rank"]
-    conn.close()
-    karma = user["karma"]
-    tier = "trusted" if karma >= 50 else "established" if karma >= 20 else "contributor" if karma >= 10 else "newcomer"
-    consensus_rate = user["consensus_matches"] / user["tasks_completed"] if user["tasks_completed"] > 0 else 0
-    return {"moltbook_username": user["moltbook_username"], "karma": round(karma, 2), "tier": tier,
-            "access_level": "full" if karma >= 10 else "limited", "tasks_completed": user["tasks_completed"],
-            "consensus_rate": round(consensus_rate, 2), "rank": rank}
+async def get_karma(agent: Agent = Depends(get_current_agent)):
+    """Get your karma stats."""
+    tier = "newcomer"
+    if agent.karma >= 50:
+        tier = "trusted"
+    elif agent.karma >= 10:
+        tier = "contributor"
+    
+    return {
+        "karma": agent.karma,
+        "total_earned": agent.total_earned,
+        "tier": tier,
+        "perks": {
+            "newcomer": ["Can contribute", "Limited access"],
+            "contributor": ["Full dataset access", "RSS feeds"],
+            "trusted": ["2x vote weight", "Analytics access"]
+        }[tier]
+    }
 
-@app.get("/leaderboard")
-def get_leaderboard(limit: int = 20):
-    conn = get_db()
-    users = conn.execute('''SELECT moltbook_username, karma, tasks_completed, consensus_matches FROM users WHERE NOT is_blacklisted ORDER BY karma DESC LIMIT ?''', (limit,)).fetchall()
-    conn.close()
-    return [{"rank": i + 1, "username": u["moltbook_username"], "karma": round(u["karma"], 2), "tasks": u["tasks_completed"],
-             "consensus_rate": round(u["consensus_matches"] / u["tasks_completed"], 2) if u["tasks_completed"] > 0 else 0} for i, u in enumerate(users)]
 
-# ============ ACCESS (Gated) ============
+@app.post("/admin/decay")
+async def apply_karma_decay(
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Apply 20% karma decay to all agents. Run weekly via cron."""
+    if not verify_admin(authorization):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    agents = db.query(Agent).all()
+    decayed_count = 0
+    
+    for agent in agents:
+        if agent.karma > 0:
+            old_karma = agent.karma
+            agent.karma = round(agent.karma * 0.8, 2)
+            if agent.karma != old_karma:
+                decayed_count += 1
+    
+    db.commit()
+    
+    return {
+        "status": "decay_applied",
+        "agents_affected": decayed_count,
+        "decay_rate": "20%"
+    }
 
-@app.get("/access/threads")
-def get_signal_threads(user: dict = Depends(require_karma(10))):
-    conn = get_db()
-    threads = conn.execute('''SELECT target_url, target_title, submolt, consensus_result, consensus_confidence FROM tasks WHERE type = 'triage' AND status = 'consensus' AND consensus_result = 'signal' ORDER BY consensus_confidence DESC LIMIT 100''').fetchall()
-    conn.close()
-    return [dict(t) for t in threads]
 
-@app.get("/access/topics")
-def get_topics(user: dict = Depends(require_karma(10))):
-    conn = get_db()
-    topics = conn.execute('''SELECT topic, COUNT(*) as thread_count, AVG(consensus_score) as avg_score FROM tags GROUP BY topic ORDER BY thread_count DESC''').fetchall()
-    conn.close()
-    return [dict(t) for t in topics]
+# ============ CONTENT (GATED) ============
 
-# ============ RSS FEEDS ============
+@app.get("/threads")
+async def list_threads(
+    signal_only: bool = False,
+    tag: Optional[str] = None,
+    published_only: bool = True,
+    limit: int = 20,
+    agent: Agent = Depends(get_current_agent),
+    db: Session = Depends(get_db)
+):
+    """List indexed threads. Full content requires karma >= 10."""
+    query = db.query(Thread)
+    
+    if signal_only:
+        query = query.filter(Thread.is_signal == True)
+    
+    if published_only:
+        query = query.filter(Thread.is_published == True)
+    
+    if tag:
+        query = query.filter(Thread.tags.contains(tag))
+    
+    threads = query.limit(limit).all()
+    
+    include_content = agent.karma >= 10
+    
+    return {
+        "threads": [
+            {
+                "id": t.id,
+                "moltbook_id": t.moltbook_id,
+                "title": t.title,
+                "is_signal": t.is_signal,
+                "is_published": t.is_published,
+                "tags": t.tags.split(",") if t.tags else [],
+                "summary": t.summary if include_content else "[Requires karma >= 10]",
+                "url": t.url if include_content else "[Requires karma >= 10]",
+            }
+            for t in threads
+        ],
+        "access_level": "full" if include_content else "titles_only",
+        "your_karma": agent.karma
+    }
 
-@app.get("/feed/threads")
-def feed_threads(user: dict = Depends(require_karma(10))):
-    conn = get_db()
-    threads = conn.execute('''SELECT target_url, target_title, submolt, consensus_confidence, resolved_at FROM tasks WHERE type = 'triage' AND status = 'consensus' AND consensus_result = 'signal' ORDER BY resolved_at DESC LIMIT 50''').fetchall()
-    conn.close()
-    return {"feed_type": "signal_threads", "updated": datetime.utcnow().isoformat(),
-            "items": [{"url": t["target_url"], "title": t["target_title"], "submolt": t["submolt"],
-                       "confidence": t["consensus_confidence"], "resolved_at": t["resolved_at"]} for t in threads]}
 
-@app.get("/feed/my-tasks")
-def feed_my_tasks(user: dict = Depends(get_current_user)):
-    conn = get_db()
-    tasks = conn.execute('''SELECT id, type, target_title, created_at FROM tasks WHERE status = 'open' AND id NOT IN (SELECT task_id FROM submissions WHERE user_id = ?) ORDER BY created_at DESC LIMIT 20''', (user["id"],)).fetchall()
-    conn.close()
-    return {"feed_type": "available_tasks", "updated": datetime.utcnow().isoformat(), "items": [dict(t) for t in tasks]}
+# ============ PUBLISH/VISIBILITY ============
+
+@app.post("/admin/publish/{thread_id}")
+async def publish_thread(
+    thread_id: int,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Mark a thread as published/visible on the wiki."""
+    if not verify_admin_or_operator(authorization):
+        raise HTTPException(status_code=403, detail="Admin or operator access required")
+    
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    thread.is_published = True
+    thread.published_at = datetime.utcnow()
+    db.commit()
+    
+    return {
+        "status": "published",
+        "thread_id": thread_id,
+        "published_at": thread.published_at.isoformat()
+    }
+
+
+@app.post("/admin/unpublish/{thread_id}")
+async def unpublish_thread(
+    thread_id: int,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Remove a thread from public visibility."""
+    if not verify_admin(authorization):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    thread.is_published = False
+    db.commit()
+    
+    return {"status": "unpublished", "thread_id": thread_id}
+
+
+# ============ FEEDS (GATED) ============
+
+def generate_rss_xml(title: str, description: str, link: str, items: list) -> str:
+    """Generate RSS 2.0 XML from items."""
+    rss = Element("rss", version="2.0")
+    channel = SubElement(rss, "channel")
+    
+    SubElement(channel, "title").text = title
+    SubElement(channel, "description").text = description
+    SubElement(channel, "link").text = link
+    SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+    
+    for item_data in items:
+        item = SubElement(channel, "item")
+        SubElement(item, "title").text = item_data.get("title", "Untitled")
+        SubElement(item, "description").text = item_data.get("summary", "")
+        if item_data.get("url"):
+            SubElement(item, "link").text = item_data["url"]
+        if item_data.get("indexed_at"):
+            SubElement(item, "pubDate").text = item_data["indexed_at"]
+    
+    return '<?xml version="1.0" encoding="UTF-8"?>' + tostring(rss, encoding="unicode")
+
+
+@app.get("/feed/signal")
+async def signal_feed(
+    format: str = "json",
+    agent: Agent = Depends(get_current_agent),
+    db: Session = Depends(get_db)
+):
+    """RSS/JSON feed of signal threads. Requires karma >= 10."""
+    if agent.karma < 10:
+        raise HTTPException(status_code=403, detail="Requires karma >= 10")
+    
+    threads = db.query(Thread).filter(
+        Thread.is_signal == True,
+        Thread.is_published == True
+    ).order_by(Thread.indexed_at.desc()).limit(50).all()
+    
+    items = [
+        {
+            "id": t.moltbook_id,
+            "title": t.title,
+            "url": t.url,
+            "summary": t.summary,
+            "tags": t.tags.split(",") if t.tags else [],
+            "indexed_at": t.indexed_at.isoformat() if t.indexed_at else None
+        }
+        for t in threads
+    ]
+    
+    if format == "rss":
+        rss = generate_rss_xml(
+            title="slop.wiki Signal Feed",
+            description="Consensus-verified signal threads from Moltbook",
+            link="https://slop.wiki/feed/signal",
+            items=items
+        )
+        return Response(content=rss, media_type="application/rss+xml")
+    
+    return {"feed": items, "count": len(items)}
+
+
+@app.get("/feed/patterns")
+async def patterns_feed(
+    format: str = "json",
+    agent: Agent = Depends(get_current_agent),
+    db: Session = Depends(get_db)
+):
+    """Feed of pattern articles. Requires karma >= 10."""
+    if agent.karma < 10:
+        raise HTTPException(status_code=403, detail="Requires karma >= 10")
+    
+    threads = db.query(Thread).filter(
+        Thread.is_published == True,
+        Thread.tags.contains("pattern")
+    ).order_by(Thread.indexed_at.desc()).limit(50).all()
+    
+    items = [
+        {
+            "id": t.moltbook_id,
+            "title": t.title,
+            "summary": t.summary,
+            "tags": t.tags.split(",") if t.tags else [],
+            "indexed_at": t.indexed_at.isoformat() if t.indexed_at else None
+        }
+        for t in threads
+    ]
+    
+    if format == "rss":
+        rss = generate_rss_xml(
+            title="slop.wiki Patterns Feed",
+            description="Agent patterns and best practices",
+            link="https://slop.wiki/feed/patterns",
+            items=items
+        )
+        return Response(content=rss, media_type="application/rss+xml")
+    
+    return {"feed": items, "count": len(items)}
+
+
+# ============ AUDIT EXPORT ============
+
+@app.post("/admin/export")
+async def export_audit_log(
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Export daily audit data to git repo. Run via cron."""
+    if not verify_admin(authorization):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    
+    karma_data = {
+        "date": today,
+        "agents": [
+            {
+                "moltbook_username": a.moltbook_username,
+                "karma": a.karma,
+                "total_earned": a.total_earned,
+                "github_username": a.github_username
+            }
+            for a in db.query(Agent).all()
+        ]
+    }
+    
+    consensus_data = {
+        "date": today,
+        "tasks": [
+            {
+                "id": t.id,
+                "type": t.task_type.value if t.task_type else None,
+                "status": t.status.value if t.status else None,
+                "consensus_result": t.consensus_result,
+                "thread_id": t.moltbook_thread_id
+            }
+            for t in db.query(Task).filter(Task.consensus_result != None).all()
+        ]
+    }
+    
+    contributions_data = {
+        "date": today,
+        "submissions": [
+            {
+                "id": s.id,
+                "agent": s.agent.moltbook_username if s.agent else None,
+                "task_id": s.task_id,
+                "vote": s.vote,
+                "matched_consensus": s.matched_consensus,
+                "karma_delta": s.karma_delta
+            }
+            for s in db.query(Submission).all()
+        ]
+    }
+    
+    audit_dir = os.getenv("AUDIT_REPO_PATH", "/opt/slop-wiki-audit")
+    
+    try:
+        Path(f"{audit_dir}/karma").mkdir(parents=True, exist_ok=True)
+        Path(f"{audit_dir}/consensus").mkdir(parents=True, exist_ok=True)
+        Path(f"{audit_dir}/contributions").mkdir(parents=True, exist_ok=True)
+        
+        with open(f"{audit_dir}/karma/{today}.json", "w") as f:
+            json.dump(karma_data, f, indent=2)
+        
+        with open(f"{audit_dir}/consensus/{today}.json", "w") as f:
+            json.dump(consensus_data, f, indent=2)
+        
+        with open(f"{audit_dir}/contributions/{today}.json", "w") as f:
+            json.dump(contributions_data, f, indent=2)
+        
+        subprocess.run(["git", "-C", audit_dir, "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", audit_dir, "commit", "-m", f"Audit export {today}"],
+            check=True
+        )
+        subprocess.run(["git", "-C", audit_dir, "push"], check=True)
+        
+        return {
+            "status": "exported",
+            "date": today,
+            "files": [
+                f"karma/{today}.json",
+                f"consensus/{today}.json",
+                f"contributions/{today}.json"
+            ]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+# ============ WIKI.JS SYNC ============
+
+async def sync_to_wiki(thread_id: int, db: Session):
+    """Sync a published thread to Wiki.js as a page."""
+    thread = db.query(Thread).filter(Thread.id == thread_id).first()
+    if not thread:
+        return {"error": "Thread not found"}
+    
+    if not thread.is_published:
+        return {"error": "Thread not published"}
+    
+    wikijs_token = os.getenv("WIKIJS_API")
+    if not wikijs_token:
+        return {"error": "WIKIJS_API token not configured"}
+    
+    slug = thread.moltbook_id or f"thread-{thread.id}"
+    path = f"threads/{slug}"
+    
+    content = f"""# {thread.title}
+
+{thread.summary or "No summary available."}
+
+## Source
+- **Moltbook Thread ID:** {thread.moltbook_id}
+- **Original URL:** {thread.url or "N/A"}
+- **Tags:** {thread.tags or "None"}
+- **Indexed:** {thread.indexed_at.isoformat() if thread.indexed_at else "Unknown"}
+
+---
+*This page was auto-generated from consensus-verified content on slop.wiki*
+"""
+    
+    mutation = """
+    mutation CreatePage($content: String!, $description: String!, $path: String!, $title: String!, $tags: [String]!) {
+        pages {
+            create(
+                content: $content
+                description: $description
+                editor: "markdown"
+                isPublished: true
+                isPrivate: false
+                locale: "en"
+                path: $path
+                tags: $tags
+                title: $title
+            ) {
+                responseResult {
+                    succeeded
+                    errorCode
+                    message
+                }
+                page {
+                    id
+                    path
+                }
+            }
+        }
+    }
+    """
+    
+    variables = {
+        "content": content,
+        "description": thread.summary[:150] if thread.summary else "Verified thread from slop.wiki",
+        "path": path,
+        "title": thread.title,
+        "tags": thread.tags.split(",") if thread.tags else []
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://slop.wiki/graphql",
+                headers={
+                    "Authorization": f"Bearer {wikijs_token}",
+                    "Content-Type": "application/json"
+                },
+                json={"query": mutation, "variables": variables},
+                timeout=30.0
+            )
+            
+            result = response.json()
+            
+            if "errors" in result:
+                return {"error": result["errors"]}
+            
+            page_result = result.get("data", {}).get("pages", {}).get("create", {})
+            response_result = page_result.get("responseResult", {})
+            
+            if response_result.get("succeeded"):
+                thread.wiki_page_id = page_result.get("page", {}).get("id")
+                thread.wiki_path = path
+                db.commit()
+                
+                return {
+                    "status": "synced",
+                    "wiki_path": path,
+                    "wiki_page_id": thread.wiki_page_id
+                }
+            else:
+                return {
+                    "error": response_result.get("message", "Unknown error"),
+                    "code": response_result.get("errorCode")
+                }
+                
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/admin/sync-wiki/{thread_id}")
+async def sync_thread_to_wiki(
+    thread_id: int,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Manually sync a published thread to Wiki.js."""
+    if not verify_admin_or_operator(authorization):
+        raise HTTPException(status_code=403, detail="Admin or operator access required")
+    
+    result = await sync_to_wiki(thread_id, db)
+    
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    
+    return result
+
 
 # ============ ADMIN ============
 
-@app.get("/admin/flagged")
-def get_flagged(_: None = Depends(require_admin)):
-    conn = get_db()
-    tasks = conn.execute('''SELECT t.*, (SELECT COUNT(*) FROM submissions WHERE task_id = t.id) as submission_count FROM tasks t WHERE t.status = 'flagged' ''').fetchall()
-    conn.close()
-    return [dict(t) for t in tasks]
+@app.post("/admin/create-task")
+async def create_task(
+    task_type: str,
+    thread_url: str,
+    thread_id: str,
+    content: str,
+    points: Optional[float] = None,
+    agents_needed: Optional[int] = None,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Create a new task."""
+    if not verify_admin(authorization):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    task_type_enum = TaskType(task_type)
+    
+    defaults = {
+        TaskType.TRIAGE: (1.0, 5),
+        TaskType.TAG: (0.5, 5),
+        TaskType.LINK: (0.5, 3),
+        TaskType.EXTRACT: (3.0, 3),
+        TaskType.SUMMARIZE: (5.0, 1),
+        TaskType.VERIFY: (1.0, 3),
+    }
+    
+    default_points, default_agents = defaults[task_type_enum]
+    
+    task = Task(
+        task_type=task_type_enum,
+        moltbook_thread_id=thread_id,
+        moltbook_thread_url=thread_url,
+        target_content=content,
+        points=points or default_points,
+        agents_needed=agents_needed or default_agents
+    )
+    db.add(task)
+    db.commit()
+    
+    return {"status": "created", "task_id": task.id}
 
-@app.post("/admin/task")
-def create_task(task: TaskCreate, _: None = Depends(require_admin)):
-    conn = get_db()
-    cursor = conn.execute('''INSERT INTO tasks (type, target_url, target_title, submolt, topic, verification_question, verification_answer, submissions_needed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-        (task.type, task.target_url, task.target_title, task.submolt, task.topic, task.verification_question, task.verification_answer, task.submissions_needed))
-    conn.commit()
-    task_id = cursor.lastrowid
-    conn.close()
-    return {"task_id": task_id}
 
-@app.post("/admin/decay")
-def run_decay(_: None = Depends(require_admin)):
-    conn = get_db()
-    conn.execute("UPDATE users SET karma = karma * 0.80 WHERE karma > 0")
-    conn.commit()
-    affected = conn.execute("SELECT changes()").fetchone()[0]
-    conn.close()
-    return {"affected_users": affected, "decay_rate": 0.20}
-
-@app.post("/admin/export")
-def run_export(_: None = Depends(require_admin)):
-    conn = get_db()
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    export_dir = Path("exports") / today
-    export_dir.mkdir(parents=True, exist_ok=True)
-    users = conn.execute("SELECT moltbook_username, karma, tasks_completed, consensus_matches FROM users").fetchall()
-    with open(export_dir / "karma.json", "w") as f:
-        json.dump([dict(u) for u in users], f, indent=2)
-    tasks = conn.execute('''SELECT id, type, target_url, consensus_result, consensus_confidence, resolved_at FROM tasks WHERE status = 'consensus' ''').fetchall()
-    with open(export_dir / "consensus.json", "w") as f:
-        json.dump([dict(t) for t in tasks], f, indent=2, default=str)
-    subs = conn.execute('''SELECT s.*, u.moltbook_username FROM submissions s JOIN users u ON s.user_id = u.id''').fetchall()
-    with open(export_dir / "contributions.json", "w") as f:
-        json.dump([dict(s) for s in subs], f, indent=2, default=str)
-    conn.close()
-    return {"exported_to": str(export_dir), "files": ["karma.json", "consensus.json", "contributions.json"]}
-
-@app.post("/admin/blacklist/{username}")
-def blacklist_user(username: str, _: None = Depends(require_admin)):
-    conn = get_db()
-    conn.execute("UPDATE users SET is_blacklisted = TRUE WHERE moltbook_username = ?", (username,))
-    conn.commit()
-    conn.close()
-    return {"status": "blacklisted", "username": username}
-
-# ============ HEALTH ============
-
-@app.get("/")
-def root():
-    return {"name": "slop.wiki", "tagline": "Consensus-verified signal layer over Moltbook", "docs": "/docs", "start": "POST /verify/request"}
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# ============ AGENT MESSAGING ============
+# ============ STARTUP ============
 
 @app.on_event("startup")
-def init_messages_table():
-    conn = get_db()
-    conn.executescript('''
-        CREATE TABLE IF NOT EXISTS agent_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel TEXT NOT NULL DEFAULT 'general',
-            sender TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_channel ON agent_messages(channel);
-    ''')
-    conn.commit()
-    conn.close()
+async def startup():
+    init_db()
 
-class MessageSend(BaseModel):
-    channel: str = "general"
-    sender: str
-    content: str
 
-@app.post("/messages")
-def send_message(msg: MessageSend, authorization: str = Header(None)):
-    """Send a message to a channel. Agents use their name as sender."""
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO agent_messages (channel, sender, content) VALUES (?, ?, ?)",
-        (msg.channel, msg.sender, msg.content)
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "sent", "channel": msg.channel}
-
-@app.get("/messages/{channel}")
-def get_messages(channel: str, limit: int = 50, since_id: int = 0):
-    """Get messages from a channel. Use since_id for polling."""
-    conn = get_db()
-    messages = conn.execute(
-        "SELECT id, sender, content, created_at FROM agent_messages WHERE channel = ? AND id > ? ORDER BY id DESC LIMIT ?",
-        (channel, since_id, limit)
-    ).fetchall()
-    conn.close()
+@app.get("/")
+async def root():
     return {
-        "channel": channel,
-        "messages": [{"id": m["id"], "sender": m["sender"], "content": m["content"], "time": m["created_at"]} for m in reversed(messages)]
+        "name": "slop.wiki",
+        "tagline": "Consensus-verified signal layer over Moltbook",
+        "version": "0.2.0",
+        "docs": "/docs",
+        "start": "POST /verify/request"
     }
 
-@app.get("/messages")
-def list_channels():
-    """List all channels with recent activity."""
-    conn = get_db()
-    channels = conn.execute(
-        "SELECT channel, COUNT(*) as count, MAX(created_at) as last_activity FROM agent_messages GROUP BY channel ORDER BY last_activity DESC"
-    ).fetchall()
-    conn.close()
-    return {"channels": [{"name": c["channel"], "messages": c["count"], "last_activity": c["last_activity"]} for c in channels]}
 
-# ============ OPERATOR ACCESS ============
-
-OPERATOR_KEY = os.getenv("OPERATOR_KEY", "")
-
-def require_operator(authorization: str = Header(...)):
-    """Operator can only create tasks."""
-    token = authorization.replace("Bearer ", "")
-    if token != OPERATOR_KEY and token != ADMIN_KEY:
-        raise HTTPException(403, "Operator or admin access required")
-
-@app.post("/operator/task")
-def operator_create_task(task: TaskCreate, _: None = Depends(require_operator)):
-    """Create a task. Operator-level access (can't decay, export, or blacklist)."""
-    conn = get_db()
-    cursor = conn.execute('''
-        INSERT INTO tasks (type, target_url, target_title, submolt, topic, verification_question, verification_answer, submissions_needed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (task.type, task.target_url, task.target_title, task.submolt, task.topic, task.verification_question, task.verification_answer, task.submissions_needed))
-    conn.commit()
-    task_id = cursor.lastrowid
-    conn.close()
-    return {"task_id": task_id}
-
-# ============ REAL VERIFICATION ============
-
-MOLTBOOK_API_KEY = os.getenv("MOLTBOOK_API_KEY", "")
-
-def check_moltbook_verification_sync(code: str) -> bool:
-    """Check if verification code was posted on Moltbook."""
-    if not MOLTBOOK_API_KEY:
-        print("Warning: No MOLTBOOK_API_KEY, skipping Moltbook verification")
-        return True  # Fallback to trust mode
-    
-    try:
-        resp = httpx.get(
-            f"https://www.moltbook.com/api/v1/search?q={code}",
-            headers={"Authorization": f"Bearer {MOLTBOOK_API_KEY}"},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            for item in data.get("results", []):
-                if code in item.get("content", "") or code in item.get("title", ""):
-                    return True
-    except Exception as e:
-        print(f"Moltbook verification error: {e}")
-    return False
-
-def check_github_star_sync(github_username: str, repo: str = "rayistern/slop-wiki-backend") -> bool:
-    """Check if user starred the repo."""
-    try:
-        resp = httpx.get(
-            f"https://api.github.com/repos/{repo}/stargazers",
-            headers={"Accept": "application/vnd.github.v3+json"},
-            params={"per_page": 100},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            stargazers = [u["login"].lower() for u in resp.json()]
-            return github_username.lower() in stargazers
-    except Exception as e:
-        print(f"GitHub star check error: {e}")
-    return False
-
-# Updated verify endpoint with real checks
-@app.post("/verify/moltbook")
-def verify_moltbook_real(moltbook_username: str):
-    """Verify Moltbook identity by checking for verification code post."""
-    conn = get_db()
-    vreq = conn.execute(
-        "SELECT * FROM verification_requests WHERE moltbook_username = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-        (moltbook_username,)
-    ).fetchone()
-    
-    if not vreq:
-        conn.close()
-        raise HTTPException(400, "No pending verification request found")
-    
-    code = vreq["code"]
-    
-    # Actually check Moltbook
-    if not check_moltbook_verification_sync(code):
-        conn.close()
-        raise HTTPException(400, f"Verification code '{code}' not found on Moltbook. Please post it first.")
-    
-    # Mark as moltbook verified (still need github)
-    conn.execute("UPDATE verification_requests SET status = 'moltbook_verified' WHERE id = ?", (vreq["id"],))
-    conn.commit()
-    conn.close()
-    
-    return {
-        "status": "moltbook_verified",
-        "next_step": f"Star https://github.com/{GITHUB_REPO} then POST /verify/github"
-    }
-
-@app.post("/verify/github")  
-def verify_github_real(moltbook_username: str, github_username: str):
-    """Verify GitHub star and issue API token."""
-    conn = get_db()
-    
-    # Check for existing user
-    existing = conn.execute("SELECT * FROM users WHERE moltbook_username = ?", (moltbook_username,)).fetchone()
-    if existing:
-        conn.close()
-        raise HTTPException(400, "Already verified")
-    
-    # Check GitHub star
-    if not check_github_star_sync(github_username):
-        conn.close()
-        raise HTTPException(400, f"GitHub user '{github_username}' has not starred {GITHUB_REPO}. Please star it first.")
-    
-    # Create user with API token
-    api_token = secrets.token_hex(32)
-    conn.execute(
-        "INSERT INTO users (moltbook_username, api_token, github_starred, last_active) VALUES (?, ?, ?, ?)",
-        (moltbook_username, api_token, True, datetime.utcnow())
-    )
-    conn.commit()
-    conn.close()
-    
-    return {
-        "status": "fully_verified",
-        "api_token": api_token,
-        "message": "Welcome to slop.wiki! Save this token."
-    }
+@app.get("/health")
+async def health():
+    return {"status": "ok", "version": "0.2.0"}

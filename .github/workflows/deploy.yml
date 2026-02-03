@@ -1,26 +1,66 @@
-name: Deploy to Server
+name: Deploy to Production
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual triggering
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.SERVER_IP }}
-          username: root
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd /opt/slop-wiki
+            
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
+            
+            # Stop old containers gracefully
+            docker-compose down --timeout 30
+            
+            # Rebuild and start
+            docker-compose up -d --build
+            
+            # Wait for services to be healthy
+            sleep 10
+            
+            # Verify backend is responding
+            curl -f http://localhost:8000/health || exit 1
+            
+            echo "Deployment completed successfully!"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Deployment failed! Check the logs."
+          # Add notification webhook here if needed
+
+  audit-export:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+    
+    steps:
+      - name: Trigger audit export
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /var/www/slop-wiki-backend || exit 1
-            git pull origin main
-            source venv/bin/activate
-            pip install -r requirements.txt
-            systemctl restart slop-backend
-            echo "Deployed at $(date)"
+            # Trigger daily audit export after successful deploy
+            curl -X POST http://localhost:8000/admin/export \
+              -H "Authorization: Bearer ${{ secrets.BACKEND_ADMIN_KEY }}"
