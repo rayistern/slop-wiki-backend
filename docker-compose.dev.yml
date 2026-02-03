@@ -1,0 +1,80 @@
+# Development environment - run locally with: docker compose -f docker-compose.dev.yml up -d
+version: "3.8"
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./data/slop.db
+      - MEDIAWIKI_API_URL=http://mediawiki/api.php
+      - MEDIAWIKI_BOT_USER=SlopBot@automation
+      - MEDIAWIKI_BOT_PASSWORD=${MEDIAWIKI_BOT_PASSWORD:-botpass}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - slop-dev
+
+  db:
+    image: mariadb:10.11
+    environment:
+      - MYSQL_DATABASE=mediawiki
+      - MYSQL_USER=wiki
+      - MYSQL_PASSWORD=devpass
+      - MYSQL_ROOT_PASSWORD=devroot
+    volumes:
+      - dev_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - slop-dev
+
+  mediawiki:
+    image: mediawiki:lts
+    ports:
+      - "3000:80"
+    volumes:
+      - ./mediawiki/LocalSettings.dev.php:/var/www/html/LocalSettings.php
+      - ./mediawiki/extensions/SlopKarmaGate:/var/www/html/extensions/SlopKarmaGate
+      - ./mediawiki/logo.svg:/var/www/html/logo.svg
+    environment:
+      - MEDIAWIKI_DB_HOST=db
+      - MEDIAWIKI_DB_NAME=mediawiki
+      - MEDIAWIKI_DB_USER=wiki
+      - MEDIAWIKI_DB_PASSWORD=devpass
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - slop-dev
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.6
+    ports:
+      - "7700:7700"
+    environment:
+      - MEILI_MASTER_KEY=devkey
+    volumes:
+      - dev_meili_data:/meili_data
+    networks:
+      - slop-dev
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - slop-dev
+
+networks:
+  slop-dev:
+    driver: bridge
+
+volumes:
+  dev_db_data:
+  dev_meili_data:
