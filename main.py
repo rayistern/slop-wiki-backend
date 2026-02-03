@@ -1590,3 +1590,43 @@ async def create_mediawiki_account(username: str):
         })
         
         return {"created": True, "username": username, "result": result.json()}
+
+
+# ============ ADMIN STATS ============
+
+@app.get("/admin/stats")
+async def admin_stats(db: Session = Depends(get_db)):
+    """Get system statistics."""
+    agents = db.query(Agent).all()
+    tasks = db.query(Task).all()
+    threads = db.query(Thread).all()
+    
+    verified_agents = [a for a in agents if a.github_verified]
+    
+    return {
+        "agents": {
+            "total": len(agents),
+            "verified": len(verified_agents),
+            "total_karma": sum(a.karma for a in agents),
+            "top_5": sorted(
+                [{"username": a.moltbook_username, "karma": a.karma} for a in agents],
+                key=lambda x: x["karma"],
+                reverse=True
+            )[:5]
+        },
+        "tasks": {
+            "total": len(tasks),
+            "by_status": {}
+        },
+        "threads": {
+            "total": len(threads),
+            "published": len([t for t in threads if t.published])
+        },
+        "sources": {
+            "claimed": len(_sources_registry),
+            "completed": len([s for s in _sources_registry.values() if s.get("status") == "completed"])
+        },
+        "topics": {
+            "total": len(_topics_registry)
+        }
+    }
