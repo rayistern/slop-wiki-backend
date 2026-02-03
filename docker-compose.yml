@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build: .
@@ -7,9 +5,8 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./backend/slop.db:/app/slop.db
     environment:
-      - DATABASE_URL=sqlite:///./slop.db
+      - DATABASE_URL=sqlite:///./data/slop.db
       - MEDIAWIKI_API_URL=http://mediawiki/api.php
       - MEDIAWIKI_BOT_USER=${MEDIAWIKI_BOT_USER:-SlopBot@automation}
       - MEDIAWIKI_BOT_PASSWORD=${MEDIAWIKI_BOT_PASSWORD}
@@ -24,10 +21,8 @@ services:
     ports:
       - "3000:80"
     volumes:
+      - mediawiki_data:/var/www/html/images
       - ./mediawiki/LocalSettings.php:/var/www/html/LocalSettings.php:ro
-      - ./mediawiki/images:/var/www/html/images
-      - ./mediawiki/logo.svg:/var/www/html/logo.svg:ro
-      - ./mediawiki/favicon.svg:/var/www/html/favicon.ico:ro
     environment:
       - MEDIAWIKI_DB_HOST=db
       - MEDIAWIKI_DB_NAME=mediawiki
@@ -58,7 +53,6 @@ services:
     networks:
       - slop-network
 
-  # Redis for MediaWiki caching (production optimization)
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
@@ -71,6 +65,7 @@ services:
 volumes:
   db_data:
   redis_data:
+  mediawiki_data:
 
 networks:
   slop-network:
