@@ -1317,3 +1317,166 @@ async def search_stats():
             raise HTTPException(status_code=500, detail=f"Failed to get stats: {e.response.text}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ SOURCE REGISTRY (Prevent Duplicate Curation) ============
+
+# In-memory store (will persist to SQLite later)
+_sources_registry: dict = {}  # moltbook_id -> {wiki_page, curator, timestamp, status}
+
+class SourceClaim(BaseModel):
+    moltbook_id: str
+    wiki_page: Optional[str] = None
+    curator: str
+
+@app.post("/sources/claim")
+async def claim_source(claim: SourceClaim):
+    """Claim a Moltbook post for curation. Prevents duplicate work."""
+    if claim.moltbook_id in _sources_registry:
+        existing = _sources_registry[claim.moltbook_id]
+        if existing["status"] == "claimed":
+            return {
+                "status": "already_claimed",
+                "claimed_by": existing["curator"],
+                "claimed_at": existing["timestamp"],
+                "wiki_page": existing.get("wiki_page")
+            }
+    
+    from datetime import datetime
+    _sources_registry[claim.moltbook_id] = {
+        "curator": claim.curator,
+        "wiki_page": claim.wiki_page,
+        "timestamp": datetime.utcnow().isoformat(),
+        "status": "claimed"
+    }
+    return {"status": "claimed", "moltbook_id": claim.moltbook_id}
+
+@app.get("/sources/{moltbook_id}")
+async def check_source(moltbook_id: str):
+    """Check if a Moltbook post has been claimed/processed."""
+    if moltbook_id in _sources_registry:
+        return {"exists": True, **_sources_registry[moltbook_id]}
+    return {"exists": False, "moltbook_id": moltbook_id}
+
+@app.post("/sources/{moltbook_id}/complete")
+async def complete_source(moltbook_id: str, wiki_page: str):
+    """Mark a claimed source as completed with wiki page link."""
+    if moltbook_id not in _sources_registry:
+        return {"error": "Source not claimed"}
+    
+    _sources_registry[moltbook_id]["status"] = "completed"
+    _sources_registry[moltbook_id]["wiki_page"] = wiki_page
+    return {"status": "completed", "moltbook_id": moltbook_id, "wiki_page": wiki_page}
+
+@app.get("/sources")
+async def list_sources(status: Optional[str] = None, limit: int = 50):
+    """List all registered sources, optionally filtered by status."""
+    sources = []
+    for mid, data in _sources_registry.items():
+        if status is None or data["status"] == status:
+            sources.append({"moltbook_id": mid, **data})
+    return {"sources": sources[:limit], "total": len(sources)}
+
+
+# ============ TOPIC REGISTRY (Controlled Vocabulary) ============
+
+_topics_registry: dict = {}  # topic_id -> {name, aliases, created_by, timestamp}
+_topic_id_counter = [0]
+_alias_to_topic: dict = {}  # alias (lowercase) -> topic_id
+
+class TopicCreate(BaseModel):
+    name: str
+    aliases: list[str] = []
+    created_by: str
+
+@app.post("/topics")
+async def create_topic(topic: TopicCreate):
+    """Create a canonical topic with optional aliases."""
+    # Check if name or any alias already exists
+    name_lower = topic.name.lower()
+    if name_lower in _alias_to_topic:
+        existing_id = _alias_to_topic[name_lower]
+        return {
+            "status": "exists",
+            "message": f"'{topic.name}' already maps to existing topic",
+            "topic": _topics_registry[existing_id]
+        }
+    
+    for alias in topic.aliases:
+        if alias.lower() in _alias_to_topic:
+            existing_id = _alias_to_topic[alias.lower()]
+            return {
+                "status": "exists", 
+                "message": f"Alias '{alias}' already maps to existing topic",
+                "topic": _topics_registry[existing_id]
+            }
+    
+    # Create new topic
+    from datetime import datetime
+    _topic_id_counter[0] += 1
+    topic_id = _topic_id_counter[0]
+    
+    all_aliases = [topic.name] + topic.aliases
+    
+    _topics_registry[topic_id] = {
+        "id": topic_id,
+        "name": topic.name,
+        "aliases": all_aliases,
+        "created_by": topic.created_by,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    # Register all aliases
+    for alias in all_aliases:
+        _alias_to_topic[alias.lower()] = topic_id
+    
+    return {"status": "created", "topic": _topics_registry[topic_id]}
+
+@app.get("/topics")
+async def search_topics(q: Optional[str] = None, limit: int = 20):
+    """Search topics by name or alias."""
+    if q is None:
+        topics = list(_topics_registry.values())[:limit]
+        return {"topics": topics, "total": len(_topics_registry)}
+    
+    q_lower = q.lower()
+    
+    # Exact alias match
+    if q_lower in _alias_to_topic:
+        topic_id = _alias_to_topic[q_lower]
+        return {"topics": [_topics_registry[topic_id]], "exact_match": True}
+    
+    # Fuzzy search
+    matches = []
+    for topic_id, topic in _topics_registry.items():
+        for alias in topic["aliases"]:
+            if q_lower in alias.lower():
+                matches.append(topic)
+                break
+    
+    return {"topics": matches[:limit], "exact_match": False}
+
+@app.get("/topics/{topic_id}")
+async def get_topic(topic_id: int):
+    """Get a topic by ID."""
+    if topic_id not in _topics_registry:
+        return {"error": "Topic not found"}
+    return _topics_registry[topic_id]
+
+@app.post("/topics/{topic_id}/aliases")
+async def add_alias(topic_id: int, alias: str):
+    """Add an alias to an existing topic."""
+    if topic_id not in _topics_registry:
+        return {"error": "Topic not found"}
+    
+    alias_lower = alias.lower()
+    if alias_lower in _alias_to_topic:
+        existing_id = _alias_to_topic[alias_lower]
+        if existing_id == topic_id:
+            return {"status": "already_exists", "topic": _topics_registry[topic_id]}
+        return {"error": f"Alias already belongs to topic {existing_id}"}
+    
+    _topics_registry[topic_id]["aliases"].append(alias)
+    _alias_to_topic[alias_lower] = topic_id
+    
+    return {"status": "added", "topic": _topics_registry[topic_id]}
