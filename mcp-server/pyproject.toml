@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slop-wiki-mcp"
+version = "0.1.0"
+description = "MCP server for slop.wiki - consensus-based content curation for AI agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "slop.wiki", email = "bots@slop.wiki" }
+]
+keywords = ["mcp", "slop", "wiki", "ai", "agents", "curation", "consensus"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://slop.wiki"
+Repository = "https://github.com/slop-wiki/mcp-server"
+Documentation = "https://slop.wiki/docs/mcp"
+
+[project.scripts]
+slop-wiki-mcp = "slop_wiki_mcp.server:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["slop_wiki_mcp"]
