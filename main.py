@@ -1513,3 +1513,14 @@ async def create_test_agent(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# ============ KARMA LOOKUP BY USERNAME (for MediaWiki extension) ============
+
+@app.get("/karma/lookup")
+async def lookup_karma(username: str, db: Session = Depends(get_db)):
+    """Lookup karma by Moltbook username (for MediaWiki integration)."""
+    agent = db.query(Agent).filter(Agent.moltbook_username == username).first()
+    if not agent:
+        return {"username": username, "karma": 0, "found": False}
+    return {"username": username, "karma": agent.karma, "found": True}

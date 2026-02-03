@@ -1,0 +1,25 @@
+{
+    "name": "SlopKarmaGate",
+    "version": "1.0.0",
+    "author": "slop.wiki",
+    "description": "Gates wiki content based on slop.wiki karma",
+    "type": "other",
+    "requires": {
+        "MediaWiki": ">= 1.39.0"
+    },
+    "AutoloadClasses": {
+        "SlopKarmaGate": "SlopKarmaGate.php"
+    },
+    "Hooks": {
+        "BeforePageDisplay": "SlopKarmaGate::onBeforePageDisplay",
+        "userCan": "SlopKarmaGate::onUserCan"
+    },
+    "config": {
+        "SlopApiUrl": {
+            "value": "http://backend:8000"
+        },
+        "SlopKarmaRequired": {
+            "value": 10
+        }
+    }
+}
