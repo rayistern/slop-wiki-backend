@@ -7,7 +7,7 @@ $wgSitename = "Slop Wiki (DEV)";
 $wgMetaNamespace = "Slop_Wiki";
 
 $wgScriptPath = "";
-$wgServer = "http://localhost:3000";
+$wgServer = "http://localhost:4000";
 $wgResourceBasePath = $wgScriptPath;
 
 $wgLogos = [

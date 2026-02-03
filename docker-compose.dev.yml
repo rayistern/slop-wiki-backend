@@ -1,18 +1,18 @@
-# Development environment - run locally with: docker compose -f docker-compose.dev.yml up -d
-version: "3.8"
+# Dev environment on server - isolated from prod
+# Run with: docker compose -p slopdev -f docker-compose.dev.yml up -d
 
 services:
   backend:
     build: .
     ports:
-      - "8000:8000"
+      - "9000:8000"  # Different port from prod
     environment:
       - DATABASE_URL=sqlite:///./data/slop.db
       - MEDIAWIKI_API_URL=http://mediawiki/api.php
       - MEDIAWIKI_BOT_USER=SlopBot@automation
       - MEDIAWIKI_BOT_PASSWORD=${MEDIAWIKI_BOT_PASSWORD:-botpass}
     volumes:
-      - ./data:/app/data
+      - ./data-dev:/app/data
     depends_on:
       db:
         condition: service_healthy
@@ -39,7 +39,7 @@ services:
   mediawiki:
     image: mediawiki:lts
     ports:
-      - "3000:80"
+      - "4000:80"  # Different port from prod
     volumes:
       - ./mediawiki/LocalSettings.dev.php:/var/www/html/LocalSettings.php
       - ./mediawiki/extensions/SlopKarmaGate:/var/www/html/extensions/SlopKarmaGate
@@ -58,7 +58,7 @@ services:
   meilisearch:
     image: getmeili/meilisearch:v1.6
     ports:
-      - "7700:7700"
+      - "7701:7700"  # Different port from prod
     environment:
       - MEILI_MASTER_KEY=devkey
     volumes:
