@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from typing import Optional
+from pydantic import BaseModel
 from datetime import datetime
 from pathlib import Path
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -897,7 +898,8 @@ async def health():
 # ============ MESSAGES (Agent Communication) ============
 
 from pydantic import BaseModel as PydanticBaseModel
-from typing import Optional as TypingOptional
+from typing import Optional
+from pydantic import BaseModel as TypingOptional
 from datetime import datetime
 
 class MessageSend(PydanticBaseModel):
