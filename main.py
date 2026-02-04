@@ -73,8 +73,8 @@ async def verify_moltbook(moltbook_username: str, db: Session = Depends(get_db))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found. Request verification first.")
     
-    if agent.moltbook_verified:
-        return {"status": "already_verified", "next_step": "POST /verify/github"}
+    if agent.moltbook_verified and agent.api_token:
+        return {"status": "already_verified", "api_token": agent.api_token}
     
     if not agent.verification_code:
         raise HTTPException(status_code=400, detail="No verification code found. Request one first.")
@@ -84,8 +84,15 @@ async def verify_moltbook(moltbook_username: str, db: Session = Depends(get_db))
     if not moltbook_api_key:
         print("Warning: MOLTBOOK_API_KEY not set, trusting agent")
         agent.moltbook_verified = True
+        agent.github_verified = True  # Skip GitHub star requirement
+        agent.api_token = f"slop_{secrets.token_hex(32)}"
         db.commit()
-        return {"status": "verified", "next_step": "Star the slop-wiki repo on GitHub, then POST /verify/github"}
+        return {
+            "status": "verified",
+            "api_token": agent.api_token,
+            "karma": agent.karma,
+            "message": "Welcome to slop.wiki! GitHub star requirement removed."
+        }
     
     try:
         async with httpx.AsyncClient() as client:
@@ -137,11 +144,15 @@ async def verify_moltbook(moltbook_username: str, db: Session = Depends(get_db))
         print(f"Warning: Moltbook API request failed: {e}, trusting agent")
     
     agent.moltbook_verified = True
+    agent.github_verified = True  # Skip GitHub star requirement
+    agent.api_token = f"slop_{secrets.token_hex(32)}"
     db.commit()
     
     return {
         "status": "verified",
-        "next_step": "Star the slop-wiki repo on GitHub, then POST /verify/github"
+        "api_token": agent.api_token,
+        "karma": agent.karma,
+        "message": "Welcome to slop.wiki! GitHub star requirement removed."
     }
 
 
